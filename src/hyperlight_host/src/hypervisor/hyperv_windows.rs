@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use log::LevelFilter;
 use tracing::{Span, instrument};
+#[cfg(feature = "trace_guest")]
+use windows::Win32::System::Hypervisor::WHV_REGISTER_NAME;
 use windows::Win32::System::Hypervisor::{
     WHV_MEMORY_ACCESS_TYPE, WHV_PARTITION_HANDLE, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
     WHV_RUN_VP_EXIT_REASON, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0,
@@ -41,6 +43,8 @@ use {
     std::sync::Mutex,
 };
 
+#[cfg(feature = "unwind_guest")]
+use super::TraceRegister;
 use super::fpu::{FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::surrogate_process::SurrogateProcess;
@@ -572,6 +576,19 @@ impl Debug for HypervWindowsDriver {
     }
 }
 
+#[cfg(feature = "trace_guest")]
+impl From<TraceRegister> for WHV_REGISTER_NAME {
+    fn from(r: TraceRegister) -> Self {
+        match r {
+            TraceRegister::RAX => windows::Win32::System::Hypervisor::WHvX64RegisterRax,
+            TraceRegister::RCX => windows::Win32::System::Hypervisor::WHvX64RegisterRcx,
+            TraceRegister::RIP => windows::Win32::System::Hypervisor::WHvX64RegisterRip,
+            TraceRegister::RSP => windows::Win32::System::Hypervisor::WHvX64RegisterRsp,
+            TraceRegister::RBP => windows::Win32::System::Hypervisor::WHvX64RegisterRbp,
+        }
+    }
+}
+
 impl Hypervisor for HypervWindowsDriver {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn initialise(
@@ -1018,6 +1035,23 @@ impl Hypervisor for HypervWindowsDriver {
         }
 
         Ok(())
+    }
+
+    #[cfg(feature = "unwind_guest")]
+    fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64> {
+        let register_names = [WHV_REGISTER_NAME::from(reg)];
+        let mut register_values: [WHV_REGISTER_VALUE; 1] = Default::default();
+        unsafe {
+            WHvGetVirtualProcessorRegisters(
+                self.get_partition_hdl(),
+                0,
+                register_names.as_ptr(),
+                register_names.len() as u32,
+                register_values.as_mut_ptr(),
+            )?;
+            // safety: all registers that we currently support are 64-bit
+            Ok(register_values[0].Reg64)
+        }
     }
 }
 
