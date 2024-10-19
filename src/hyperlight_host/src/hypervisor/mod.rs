@@ -494,7 +494,7 @@ pub(crate) mod tests {
 
     use hyperlight_testing::dummy_guest_as_string;
 
-    use super::handlers::{MemAccessHandler, OutBHandler};
+    use super::handlers::{MemAccessHandler, OutBHandler, OutBHandlerFunction};
     #[cfg(gdb)]
     use crate::hypervisor::DbgMemAccessHandlerCaller;
     use crate::mem::ptr::RawPtr;
@@ -529,11 +529,6 @@ pub(crate) mod tests {
             return Ok(());
         }
 
-        let outb_handler: Arc<Mutex<OutBHandler>> = {
-            let func: Box<dyn FnMut(u16, u32) -> Result<()> + Send> =
-                Box::new(|_, _| -> Result<()> { Ok(()) });
-            Arc::new(Mutex::new(OutBHandler::from(func)))
-        };
         let mem_access_handler = {
             let func: Box<dyn FnMut() -> Result<()> + Send> = Box::new(|| -> Result<()> { Ok(()) });
             Arc::new(Mutex::new(MemAccessHandler::from(func)))
@@ -555,6 +550,14 @@ pub(crate) mod tests {
             #[cfg(any(crashdump, gdb))]
             &rt_cfg,
         )?;
+        let outb_handler: Arc<Mutex<OutBHandler>> = {
+            #[cfg(feature = "trace_guest")]
+            #[allow(clippy::type_complexity)]
+            let func: OutBHandlerFunction = Box::new(|_, _, _, _| -> Result<()> { Ok(()) });
+            #[cfg(not(feature = "trace_guest"))]
+            let func: OutBHandlerFunction = Box::new(|_, _| -> Result<()> { Ok(()) });
+            Arc::new(Mutex::new(OutBHandler::from(func)))
+        };
         vm.initialise(
             RawPtr::from(0x230000),
             1234567890,

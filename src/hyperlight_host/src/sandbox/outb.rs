@@ -26,9 +26,13 @@ use tracing_log::format_trace;
 
 use super::host_funcs::FunctionRegistry;
 use super::mem_mgr::MemMgrWrapper;
+#[cfg(feature = "trace_guest")]
+use crate::hypervisor::Hypervisor;
 use crate::hypervisor::handlers::{OutBHandler, OutBHandlerFunction, OutBHandlerWrapper};
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
+#[cfg(feature = "trace_guest")]
+use crate::sandbox::TraceInfo;
 use crate::{HyperlightError, Result, new_error};
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level="Trace")]
@@ -149,6 +153,8 @@ fn outb_abort(mem_mgr: &mut MemMgrWrapper<HostSharedMemory>, data: u32) -> Resul
 fn handle_outb_impl(
     mem_mgr: &mut MemMgrWrapper<HostSharedMemory>,
     host_funcs: Arc<Mutex<FunctionRegistry>>,
+    #[cfg(feature = "trace_guest")] _hv: &mut dyn Hypervisor,
+    #[cfg(feature = "trace_guest")] _trace_info: TraceInfo,
     port: u16,
     data: u32,
 ) -> Result<()> {
@@ -192,14 +198,23 @@ pub(crate) fn outb_handler_wrapper(
     mut mem_mgr_wrapper: MemMgrWrapper<HostSharedMemory>,
     host_funcs_wrapper: Arc<Mutex<FunctionRegistry>>,
 ) -> OutBHandlerWrapper {
-    let outb_func: OutBHandlerFunction = Box::new(move |port, payload| {
-        handle_outb_impl(
-            &mut mem_mgr_wrapper,
-            host_funcs_wrapper.clone(),
-            port,
-            payload,
-        )
-    });
+    let outb_func: OutBHandlerFunction = Box::new(
+        move |#[cfg(feature = "trace_guest")] hv,
+              #[cfg(feature = "trace_guest")] trace_info,
+              port,
+              payload| {
+            handle_outb_impl(
+                &mut mem_mgr_wrapper,
+                host_funcs_wrapper.clone(),
+                #[cfg(feature = "trace_guest")]
+                hv,
+                #[cfg(feature = "trace_guest")]
+                trace_info,
+                port,
+                payload,
+            )
+        },
+    );
     let outb_hdl = OutBHandler::from(outb_func);
     Arc::new(Mutex::new(outb_hdl))
 }

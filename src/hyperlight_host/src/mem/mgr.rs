@@ -369,7 +369,14 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             &mut shared_mem.as_mut_slice()[layout.get_guest_code_offset()..],
         )?;
 
-        Ok(Self::new(layout, shared_mem, load_addr, entrypoint_offset))
+        Ok(Self::new(
+            layout,
+            shared_mem,
+            load_addr,
+            entrypoint_offset,
+            #[cfg(target_os = "windows")]
+            None,
+        ))
     }
 
     /// Writes host function details to memory
