@@ -3,15 +3,7 @@
 {
 	"name": "Hyperlight",
 
-	"build": {
-    "dockerfile": "Dockerfile",
-    "args": {
-      "USER": "vscode",
-      "GROUP": "vscode",
-      "DEVICE_GROUP": "kvm",
-      "RUST_TOOLCHAIN": "1.81.0"
-    }
-  },
+	"image": "ghcr.io/dblnz/hyperlight-devcontainer:latest",
 
 	"remoteUser": "vscode",
 
