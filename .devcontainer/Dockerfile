@@ -1,6 +1,6 @@
 ## Dockerfile for devcontainer
 
-FROM mcr.microsoft.com/devcontainers/base:debian AS base
+FROM ghcr.io/dblnz/hyperlight-devcontainer:latest
 
 ARG USER
 ARG GROUP
@@ -34,8 +34,6 @@ RUN wget https://apt.llvm.org/llvm.sh \
     && sudo ln -s /usr/lib/llvm-17/bin/llvm-ml /usr/bin/llvm-ml   \
     && sudo ln -s /usr/lib/llvm-17/bin/ld.lld /usr/bin/ld.lld     \
     && sudo ln -s /usr/lib/llvm-17/bin/clang /usr/bin/clang
-
-FROM base AS dev
 
 # Create DEVICE_GROUP user/group so we can assign the vscode user to the group and
 # use the device when it needs
