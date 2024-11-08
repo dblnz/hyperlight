@@ -2,10 +2,12 @@
 
 FROM mcr.microsoft.com/devcontainers/base:debian AS base
 
-ARG USERNAME
-ARG HYPERVISOR
+ARG USER
+ARG GROUP
+ARG DEVICE_GROUP
+ARG RUST_TOOLCHAIN
 
-ENV HOME="/home/${USERNAME}"
+ENV HOME="/home/${USER}"
 ENV PATH="$HOME/.cargo/bin:$PATH"
 
 # Install dependencies
@@ -18,12 +20,9 @@ RUN apt-get update \
         gnupg \
         lsb-release \
         make \
-        net-tools \
         software-properties-common \
         sudo \
-        tree \
         wget
-
 
 # Install llvm
 RUN wget https://apt.llvm.org/llvm.sh \
@@ -38,28 +37,29 @@ RUN wget https://apt.llvm.org/llvm.sh \
 
 FROM base AS dev
 
-# Create HYPERVISOR user/group so we can assign the vscode user to the group and
+# Create DEVICE_GROUP user/group so we can assign the vscode user to the group and
 # use the device when it needs
-RUN groupadd $HYPERVISOR \
-    && useradd -r -g $HYPERVISOR $HYPERVISOR \
-    && usermod -a -G $HYPERVISOR $USERNAME
+RUN groupadd -r $DEVICE_GROUP \
+    && usermod -a -G $DEVICE_GROUP ${USER}
 
 # Make sure the devcontainer user has sudo access
-RUN group_id=$(id -g) \
-    ; group_name=$(getent group ${group_id} | cut -d: -f1) \
-    && chown -R "${USERNAME}:$group_name" /home/${USERNAME} \
-    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+RUN chown -R "${USER}:$GROUP" /home/${USER} \
+    && echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 # Persist bash hystory
 RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=/commandhistory/.bash_history" \
     && mkdir /commandhistory \
     && touch /commandhistory/.bash_history \
-    && chown -R $USERNAME /commandhistory \
-    && echo "$SNIPPET" >> "/home/$USERNAME/.bashrc"
+    && chown -R $USER /commandhistory \
+    && echo "$SNIPPET" >> "/home/$USER/.bashrc"
 
-USER $USERNAME
+USER $USER
 
 # Install rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && rustup default $RUST_TOOLCHAIN \
+    && rustup target add x86_64-unknown-linux-gnu \
+    && rustup target add x86_64-unknown-none      \
+    && rustup target add x86_64-pc-windows-msvc   \
     && cargo install just
 
