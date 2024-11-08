@@ -31,7 +31,11 @@ jobs:
 
       - name: Build and push Docker image
         run: |
-            docker build ./.devcontainer/ --tag ghcr.io/dblnz/hyperlight-devcontainer-kvm:latest --build-arg USER=vscode --build-arg GROUP=vscode DEVICE_GROUP=kvm RUST_TOOLCHAIN="1.81.0"
+            docker build ./.devcontainer/ --tag ghcr.io/dblnz/hyperlight-devcontainer-kvm:latest \
+                --build-arg USER=vscode \
+                --build-arg GROUP=vscode \
+                --build-arg DEVICE_GROUP=kvm \
+                --build-arg RUST_TOOLCHAIN=1.81.0
             docker run ghcr.io/dblnz/hyperlight-devcontainer-kvm:latest
             docker push ghcr.io/dblnz/hyperlight-devcontainer-kvm:latest
 
