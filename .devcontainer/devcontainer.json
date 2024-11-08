@@ -3,7 +3,7 @@
 {
 	"name": "Hyperlight",
 
-	"image": "ghcr.io/dblnz/hyperlight-devcontainer:latest",
+	"image": "ghcr.io/dblnz/hyperlight-devcontainer-kvm:latest",
 
 	"remoteUser": "vscode",
 
