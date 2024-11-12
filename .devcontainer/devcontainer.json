@@ -1,21 +1,21 @@
 // For more info on the configuration below, check out the link:
 // https://code.visualstudio.com/docs/devcontainers/create-dev-container
 {
-	"name": "Hyperlight",
+  "name": "Hyperlight",
 
   "build": {
     "dockerfile": "Dockerfile"
   },
 
-	"remoteUser": "vscode",
+  "remoteUser": "vscode",
 
-	"runArgs": [
+  "runArgs": [
       "--env-file", ".devcontainer/.env",
       "--device=/dev/kvm"
   ],
 
-	// Use 'initializeCommand' to run commands before container image build
-	"initializeCommand": "bash .devcontainer/create_env.sh",
+  // Use 'initializeCommand' to run commands before container image build
+  "initializeCommand": "bash .devcontainer/create_env.sh",
 
   "customizations": {
     "vscode": {
