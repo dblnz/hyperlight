@@ -1053,6 +1053,11 @@ impl Hypervisor for HypervWindowsDriver {
             Ok(register_values[0].Reg64)
         }
     }
+
+    #[cfg(feature = "trace_guest")]
+    fn trace_info_as_ref(&self) -> &TraceInfo {
+        &self.trace_info
+    }
 }
 
 impl Drop for HypervWindowsDriver {

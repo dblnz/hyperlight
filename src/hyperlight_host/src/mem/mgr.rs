@@ -338,7 +338,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         cfg: SandboxConfiguration,
         exe_info: ExeInfo,
         guest_blob: Option<&GuestBlob>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, super::exe::LoadInfo)> {
         let guest_blob_size = guest_blob.map(|b| b.data.len()).unwrap_or(0);
         let guest_blob_mem_flags = guest_blob.map(|b| b.permissions);
 
@@ -364,18 +364,21 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             shared_mem.write_u64(offset, load_addr_u64)?;
         }
 
-        exe_info.load(
+        let load_info = exe_info.load(
             load_addr.clone().try_into()?,
             &mut shared_mem.as_mut_slice()[layout.get_guest_code_offset()..],
         )?;
 
-        Ok(Self::new(
-            layout,
-            shared_mem,
-            load_addr,
-            entrypoint_offset,
-            #[cfg(target_os = "windows")]
-            None,
+        Ok((
+            Self::new(
+                layout,
+                shared_mem,
+                load_addr,
+                entrypoint_offset,
+                #[cfg(target_os = "windows")]
+                None,
+            ),
+            load_info,
         ))
     }
 
