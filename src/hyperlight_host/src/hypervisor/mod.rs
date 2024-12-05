@@ -269,7 +269,7 @@ pub struct VirtualCPU {}
 impl VirtualCPU {
     /// Run the given hypervisor until a halt instruction is reached
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    pub fn run(
+    pub(crate) fn run(
         hv: &mut dyn Hypervisor,
         outb_handle_fn: Arc<Mutex<dyn OutBHandlerCaller>>,
         mem_access_fn: Arc<Mutex<dyn MemAccessHandlerCaller>>,

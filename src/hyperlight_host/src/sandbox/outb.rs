@@ -14,8 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#[cfg(feature = "unwind_guest")]
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "unwind_guest")]
+use fallible_iterator::FallibleIterator;
+#[cfg(feature = "unwind_guest")]
+use framehop::Unwinder;
 use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
@@ -29,6 +35,8 @@ use super::mem_mgr::MemMgrWrapper;
 #[cfg(feature = "trace_guest")]
 use crate::hypervisor::Hypervisor;
 use crate::hypervisor::handlers::{OutBHandler, OutBHandlerFunction, OutBHandlerWrapper};
+#[cfg(feature = "unwind_guest")]
+use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
 #[cfg(feature = "trace_guest")]
@@ -144,7 +152,64 @@ fn outb_abort(mem_mgr: &mut MemMgrWrapper<HostSharedMemory>, data: u32) -> Resul
 
         buffer.push(b);
     }
+    Ok(())
+}
 
+#[cfg(feature = "unwind_guest")]
+fn unwind(
+    hv: &mut dyn Hypervisor,
+    mem: &SandboxMemoryManager<HostSharedMemory>,
+    trace_info: &mut TraceInfo,
+) -> Result<Vec<u64>> {
+    let mut read_stack = |addr| {
+        mem.shared_mem
+            .read::<u64>((addr - SandboxMemoryLayout::BASE_ADDRESS as u64) as usize)
+            .map_err(|_| ())
+    };
+    let mut cache = trace_info
+        .unwind_cache
+        .try_lock()
+        .map_err(|e| new_error!("could not lock unwinder cache {}\n", e))?;
+    let iter = trace_info.unwinder.iter_frames(
+        hv.read_trace_reg(crate::hypervisor::TraceRegister::RIP)?,
+        framehop::x86_64::UnwindRegsX86_64::new(
+            hv.read_trace_reg(crate::hypervisor::TraceRegister::RIP)?,
+            hv.read_trace_reg(crate::hypervisor::TraceRegister::RSP)?,
+            hv.read_trace_reg(crate::hypervisor::TraceRegister::RBP)?,
+        ),
+        &mut *cache,
+        &mut read_stack,
+    );
+    iter.map(|f| Ok(f.address() - mem.layout.get_guest_code_address() as u64))
+        .collect()
+        .map_err(|e| new_error!("couldn't unwind: {}", e))
+}
+
+#[cfg(feature = "unwind_guest")]
+fn write_stack(out: &mut std::fs::File, stack: &[u64]) {
+    let _ = out.write_all(&stack.len().to_ne_bytes());
+    for frame in stack {
+        let _ = out.write_all(&frame.to_ne_bytes());
+    }
+}
+
+#[cfg(feature = "unwind_guest")]
+pub(super) fn record_trace_frame<F: FnOnce(&mut std::fs::File)>(
+    trace_info: &TraceInfo,
+    frame_id: u64,
+    write_frame: F,
+) -> Result<()> {
+    let Ok(mut out) = trace_info.file.lock() else {
+        return Ok(());
+    };
+    // frame structure:
+    // 16 bytes timestamp
+    let now = std::time::Instant::now().saturating_duration_since(trace_info.epoch);
+    let _ = out.write_all(&now.as_micros().to_ne_bytes());
+    // 8 bytes frame type id
+    let _ = out.write_all(&frame_id.to_ne_bytes());
+    // frame data
+    write_frame(&mut out);
     Ok(())
 }
 
@@ -154,7 +219,7 @@ fn handle_outb_impl(
     mem_mgr: &mut MemMgrWrapper<HostSharedMemory>,
     host_funcs: Arc<Mutex<FunctionRegistry>>,
     #[cfg(feature = "trace_guest")] _hv: &mut dyn Hypervisor,
-    #[cfg(feature = "trace_guest")] _trace_info: TraceInfo,
+    #[cfg(feature = "trace_guest")] mut _trace_info: TraceInfo,
     port: u16,
     data: u32,
 ) -> Result<()> {
@@ -185,6 +250,15 @@ fn handle_outb_impl(
 
             eprint!("{}", ch);
             Ok(())
+        }
+        #[cfg(feature = "unwind_guest")]
+        OutBAction::TraceRecordStack => {
+            let Ok(stack) = unwind(_hv, mem_mgr.as_ref(), &mut _trace_info) else {
+                return Ok(());
+            };
+            record_trace_frame(&_trace_info, 1u64, |f| {
+                write_stack(f, &stack);
+            })
         }
     }
 }
@@ -256,7 +330,7 @@ mod tests {
 
         let new_mgr = || {
             let exe_info = simple_guest_exe_info().unwrap();
-            let mut mgr =
+            let (mut mgr, _) =
                 SandboxMemoryManager::load_guest_binary_into_memory(sandbox_cfg, exe_info, None)
                     .unwrap();
             let mem_size = mgr.get_shared_mem_mut().mem_size();
@@ -368,7 +442,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber.clone(), || {
             let new_mgr = || {
                 let exe_info = simple_guest_exe_info().unwrap();
-                let mut mgr = SandboxMemoryManager::load_guest_binary_into_memory(
+                let (mut mgr, _) = SandboxMemoryManager::load_guest_binary_into_memory(
                     sandbox_cfg,
                     exe_info,
                     None,

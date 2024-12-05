@@ -309,6 +309,7 @@ impl HypervWindowsDriver {
         mmap_file_handle: HandleWrapper,
         #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
         #[cfg(crashdump)] rt_cfg: SandboxRuntimeConfig,
+        #[cfg(feature = "trace_guest")] trace_info: TraceInfo,
     ) -> Result<Self> {
         // create and setup hypervisor partition
         let mut partition = VMPartition::new(1)?;
