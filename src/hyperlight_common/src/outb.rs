@@ -98,6 +98,10 @@ pub enum OutBAction {
     DebugPrint = 103,
     #[cfg(feature = "unwind_guest")]
     TraceRecordStack = 104,
+    #[cfg(feature = "mem_profile")]
+    TraceMemoryAlloc,
+    #[cfg(feature = "mem_profile")]
+    TraceMemoryFree,
 }
 
 impl TryFrom<u16> for OutBAction {
@@ -110,6 +114,10 @@ impl TryFrom<u16> for OutBAction {
             103 => Ok(OutBAction::DebugPrint),
             #[cfg(feature = "unwind_guest")]
             104 => Ok(OutBAction::TraceRecordStack),
+            #[cfg(feature = "mem_profile")]
+            105 => Ok(OutBAction::TraceMemoryAlloc),
+            #[cfg(feature = "mem_profile")]
+            106 => Ok(OutBAction::TraceMemoryFree),
             _ => Err(anyhow::anyhow!("Invalid OutBAction value: {}", val)),
         }
     }
