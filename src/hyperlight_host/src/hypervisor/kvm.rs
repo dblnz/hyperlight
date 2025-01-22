@@ -25,7 +25,7 @@ use tracing::{instrument, Span};
 
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
-use super::gdb::{self, target::HyperlightKvmSandboxTarget, DebugMessage, GdbConnection};
+use super::gdb::{self, kvm_target::HyperlightKvmSandboxTarget, DebugMessage, GdbConnection};
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::{
     HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP,
