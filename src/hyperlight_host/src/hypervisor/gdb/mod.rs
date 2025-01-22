@@ -43,11 +43,8 @@ impl From<io::Error> for GdbTargetError {
 }
 
 impl From<DebugMessage> for GdbTargetError {
-    fn from(value: DebugMessage) -> Self {
-        match value {
-            DebugMessage::VcpuStoppedEv => GdbTargetError::UnexpectedMessageError,
-            _ => GdbTargetError::UnexpectedMessageError,
-        }
+    fn from(_value: DebugMessage) -> Self {
+        GdbTargetError::UnexpectedMessageError
     }
 }
 
@@ -140,7 +137,6 @@ where
     <T as Target>::Error:
         std::fmt::Debug + Send + From<io::Error> + From<DebugMessage> + From<TryRecvError>,
 {
-    // TODO: Address multiple sandboxes scenario
     let socket = format!("localhost:{}", 8081);
 
     log::info!("Listening on {:?}", socket);

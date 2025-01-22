@@ -176,7 +176,6 @@ impl HyperlightKvmSandboxTarget {
 
     /// Translates the guest address to physical address
     fn translate_gva(&self, gva: u64) -> Result<u64, GdbTargetError> {
-        // TODO: Properly handle errors
         let tr = self
             .vcpu_fd
             .lock()
