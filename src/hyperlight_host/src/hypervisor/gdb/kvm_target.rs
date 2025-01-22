@@ -5,9 +5,8 @@ use gdbstub::arch::Arch;
 use gdbstub::common::Signal;
 use gdbstub::stub::{BaseStopReason, SingleThreadStopReason};
 use gdbstub::target::ext::base::singlethread::{
-    SingleThreadBase,
-    SingleThreadResume, SingleThreadResumeOps,
-    SingleThreadSingleStep, SingleThreadSingleStepOps,
+    SingleThreadBase, SingleThreadResume, SingleThreadResumeOps, SingleThreadSingleStep,
+    SingleThreadSingleStepOps,
 };
 use gdbstub::target::ext::base::BaseOps;
 use gdbstub::target::ext::breakpoints::{
@@ -19,12 +18,12 @@ use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use gdbstub_arch::x86::X86_64_SSE as GdbTargetArch;
 use hyperlight_common::mem::PAGE_SIZE;
 use kvm_bindings::{
-    kvm_guest_debug, kvm_regs, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP, KVM_GUESTDBG_USE_HW_BP,
+    kvm_guest_debug, kvm_regs, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP,
+    KVM_GUESTDBG_USE_HW_BP,
 };
 use kvm_ioctls::VcpuFd;
 
-use super::GdbConnection;
-use super::GdbTargetError;
+use super::{GdbConnection, GdbTargetError};
 use crate::hypervisor::gdb::{DebugMessage, GdbDebug};
 use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -148,28 +147,6 @@ impl HyperlightKvmSandboxTarget {
         Ok(regs.rip)
     }
 
-    /// Get the reason the vCPU has stopped
-    pub fn get_stop_reason(&self) -> Result<Option<BaseStopReason<(), u64>>, GdbTargetError> {
-        if self.single_step {
-            return Ok(Some(SingleThreadStopReason::SignalWithThread {
-                tid: (),
-                signal: Signal::SIGTRAP,
-            }));
-        }
-
-        let ip = self.get_instruction_pointer()?;
-
-        if self.hw_breakpoints.contains(&ip) {
-            return Ok(Some(SingleThreadStopReason::HwBreak(())));
-        }
-
-        if ip == self.entrypoint {
-            return Ok(Some(SingleThreadStopReason::HwBreak(())));
-        }
-
-        Ok(None)
-    }
-
     fn set_single_step(&mut self, enable: bool) -> Result<(), GdbTargetError> {
         self.single_step = enable;
 
@@ -200,73 +177,6 @@ impl HyperlightKvmSandboxTarget {
             Err(GdbTargetError::InvalidGva)
         } else {
             Ok(tr.physical_address)
-        }
-    }
-
-    pub fn pause_vcpu(&mut self) {
-        self.paused = true;
-    }
-
-    /// Sends an event to the Hypervisor that tells it to resume vCPU execution
-    /// Note: The method waits for a confirmation message
-    pub fn resume_vcpu(&mut self) -> Result<(), GdbTargetError> {
-        if self.paused {
-            log::info!("Attempted to resume running vCPU");
-
-            self.send(DebugMessage::VcpuResumeEv)
-                .map_err(|_| GdbTargetError::CannotResume)?;
-
-            // TODO: Maybe add timeout here because if the confirmation is not
-            // sent right away, it means something is not right
-            let response = self.recv().map_err(|_| GdbTargetError::CannotResume)?;
-            log::info!("Got message {:?}", response);
-
-            if let DebugMessage::RspOk = response {
-                self.paused = false;
-            } else {
-                log::error!("Error when resuming");
-                return Err(GdbTargetError::CannotResume);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Add new breakpoint at provided address if there is enough space
-    fn add_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
-        log::debug!("Add breakpoint at address {:X}", addr);
-        if self.hw_breakpoints.contains(&addr)
-            || self.hw_breakpoints.len() >= KvmDebug::MAX_NO_OF_HW_BP
-        {
-            Ok(false)
-        } else {
-            self.hw_breakpoints.push(addr);
-            self.debug.set_breakpoints(
-                &self.vcpu_fd.lock().unwrap(),
-                &self.hw_breakpoints,
-                false,
-            )?;
-
-            Ok(true)
-        }
-    }
-
-    /// Removes breakpoint at the provided address if exists
-    fn remove_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
-        log::debug!("Remove breakpoint at address {:X}", addr);
-        if self.hw_breakpoints.contains(&addr) {
-            let index = self.hw_breakpoints.iter().position(|a| *a == addr).unwrap();
-            self.hw_breakpoints.copy_within(index + 1.., index);
-            self.hw_breakpoints.pop();
-            self.debug.set_breakpoints(
-                &self.vcpu_fd.lock().unwrap(),
-                &self.hw_breakpoints,
-                false,
-            )?;
-
-            Ok(true)
-        } else {
-            Ok(false)
         }
     }
 
@@ -337,16 +247,73 @@ impl HyperlightKvmSandboxTarget {
 }
 
 impl GdbDebug for HyperlightKvmSandboxTarget {
-    fn send(&self, ev: DebugMessage) -> Result<(), GdbTargetError> {
+    fn send(&self, ev: DebugMessage) -> Result<(), Self::Error> {
         self.hyp_conn.send(ev)
     }
 
-    fn recv(&self) -> Result<DebugMessage, GdbTargetError> {
+    fn recv(&self) -> Result<DebugMessage, Self::Error> {
         self.hyp_conn.recv()
     }
 
     fn try_recv(&self) -> Result<DebugMessage, TryRecvError> {
         self.hyp_conn.try_recv()
+    }
+
+    fn pause_vcpu(&mut self) {
+        self.paused = true;
+    }
+
+    /// Sends an event to the Hypervisor that tells it to resume vCPU execution
+    /// Note: The method waits for a confirmation message
+    fn resume_vcpu(&mut self) -> Result<(), Self::Error> {
+        if self.paused {
+            log::info!("Attempted to resume paused vCPU");
+
+            self.send(DebugMessage::VcpuResumeEv)
+                .map_err(|_| GdbTargetError::CannotResume)?;
+
+            // TODO: Maybe add timeout here because if the confirmation is not
+            // sent right away, it means something is not right
+            let response = self.recv().map_err(|_| GdbTargetError::CannotResume)?;
+            log::info!("Got message {:?}", response);
+
+            if let DebugMessage::RspOk = response {
+                self.paused = false;
+            } else {
+                log::error!("Error when resuming");
+                return Err(GdbTargetError::CannotResume);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the reason the vCPU has stopped
+    fn get_stop_reason(
+        &self,
+    ) -> Result<Option<BaseStopReason<(), <Self::Arch as Arch>::Usize>>, Self::Error> {
+        if self.single_step {
+            return Ok(Some(SingleThreadStopReason::SignalWithThread {
+                tid: (),
+                signal: Signal::SIGTRAP,
+            }));
+        }
+
+        let ip = self.get_instruction_pointer()?;
+        let gpa = self.translate_gva(ip)?;
+        if self.sw_breakpoints.contains_key(&gpa) {
+            return Ok(Some(SingleThreadStopReason::SwBreak(())));
+        }
+
+        if self.hw_breakpoints.contains(&ip) {
+            return Ok(Some(SingleThreadStopReason::HwBreak(())));
+        }
+
+        if ip == self.entrypoint {
+            return Ok(Some(SingleThreadStopReason::HwBreak(())));
+        }
+
+        Ok(None)
     }
 }
 
@@ -386,7 +353,8 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
 
         let mut mgr = self.mgr.lock().unwrap();
         while !data.is_empty() {
-            let gpa = self.translate_gva(gva).expect("");
+            let gpa = self.translate_gva(gva).map_err(TargetError::Fatal)?;
+
             let read_len = std::cmp::min(
                 data.len(),
                 (PAGE_SIZE - (gpa & (PAGE_SIZE - 1))).try_into().unwrap(),
@@ -414,7 +382,7 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
 
         let mut mgr = self.mgr.lock().unwrap();
         while !data.is_empty() {
-            let gpa = self.translate_gva(gva).expect("");
+            let gpa = self.translate_gva(gva).map_err(TargetError::Fatal)?;
 
             let write_len = std::cmp::min(
                 data.len(),
@@ -472,20 +440,62 @@ impl Breakpoints for HyperlightKvmSandboxTarget {
 }
 
 impl HwBreakpoint for HyperlightKvmSandboxTarget {
+    /// Adds a hardware breakpoint to an array that can store a maximum of
+    /// `KvmDebug::MAX_NO_OF_HW_BP` breakpoints and updates vCPU debug config
+    /// to reflect the newly added breakpoint
+    ///
+    /// NOTE: The method checks for the address to be valid, checks for the address
+    /// to not be already added and checks for the maximum number of breakpoints
+    /// to not be exceeded
     fn add_hw_breakpoint(
         &mut self,
         addr: <Self::Arch as Arch>::Usize,
         _kind: <Self::Arch as Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
-        self.add_breakpoint(addr).map_err(TargetError::Fatal)
+        log::debug!("Add hw breakpoint at address {:X}", addr);
+
+        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+
+        if self.hw_breakpoints.contains(&addr) {
+            Ok(true)
+        } else if self.hw_breakpoints.len() >= KvmDebug::MAX_NO_OF_HW_BP {
+            Ok(false)
+        } else {
+            self.hw_breakpoints.push(addr);
+            self.debug
+                .set_breakpoints(&self.vcpu_fd.lock().unwrap(), &self.hw_breakpoints, false)
+                .map_err(TargetError::Fatal)?;
+
+            Ok(true)
+        }
     }
 
+    /// Removes a hardware breakpoint from the array of breakpoints and updates
+    /// the vCPU debug config to reflect the change.
     fn remove_hw_breakpoint(
         &mut self,
         addr: <Self::Arch as Arch>::Usize,
         _kind: <Self::Arch as Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
-        self.remove_breakpoint(addr).map_err(TargetError::Fatal)
+        log::debug!("Remove hw breakpoint at address {:X}", addr);
+
+        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+
+        if self.hw_breakpoints.contains(&addr) {
+            let index = self.hw_breakpoints.iter().position(|a| *a == addr).unwrap();
+            self.hw_breakpoints.copy_within(index + 1.., index);
+            self.hw_breakpoints.pop();
+            self.debug
+                .set_breakpoints(&self.vcpu_fd.lock().unwrap(), &self.hw_breakpoints, false)
+                .map_err(TargetError::Fatal)?;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
     }
 }
 

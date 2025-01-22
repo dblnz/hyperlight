@@ -1,18 +1,25 @@
+use std::marker::PhantomData;
+
+use gdbstub::arch::Arch;
 use gdbstub::common::Signal;
 use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::run_blocking::{self, WaitForStopReasonError};
 use gdbstub::stub::{DisconnectReason, GdbStub, SingleThreadStopReason};
+use gdbstub::target::Target;
 
-use super::target::HyperlightKvmSandboxTarget;
-use super::GdbTargetError;
 use crate::hypervisor::gdb::GdbDebug;
 
-pub struct GdbBlockingEventLoop;
+pub struct GdbBlockingEventLoop<T> {
+    _phantom: PhantomData<T>,
+}
 
-impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
+impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T>
+where
+    <T as Target>::Error: From<crossbeam_channel::TryRecvError>,
+{
     type Connection = Box<dyn ConnectionExt<Error = std::io::Error>>;
-    type StopReason = SingleThreadStopReason<u64>;
-    type Target = HyperlightKvmSandboxTarget;
+    type StopReason = SingleThreadStopReason<<T::Arch as Arch>::Usize>;
+    type Target = T;
 
     fn wait_for_stop_reason(
         target: &mut Self::Target,
@@ -46,13 +53,10 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
                     return Ok(run_blocking::Event::TargetStopped(stop_response));
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => (),
-                Err(_) => {
-                    return Err(run_blocking::WaitForStopReasonError::Target(
-                        GdbTargetError::QueueError,
-                    ));
+                Err(e) => {
+                    return Err(run_blocking::WaitForStopReasonError::Target(e.into()));
                 }
             }
-
 
             if conn.peek().map(|b| b.is_some()).unwrap_or(false) {
                 let byte = conn
@@ -76,11 +80,14 @@ impl run_blocking::BlockingEventLoop for GdbBlockingEventLoop {
     }
 }
 
-pub fn event_loop_thread(
-    debugger: GdbStub<HyperlightKvmSandboxTarget, Box<dyn ConnectionExt<Error = std::io::Error>>>,
-    mut target: HyperlightKvmSandboxTarget,
-) {
-    match debugger.run_blocking::<GdbBlockingEventLoop>(&mut target) {
+pub fn event_loop_thread<T: GdbDebug>(
+    debugger: GdbStub<T, Box<dyn ConnectionExt<Error = std::io::Error>>>,
+    target: &mut T,
+) where
+    <T as Target>::Error: std::fmt::Debug,
+    <T as Target>::Error: From<crossbeam_channel::TryRecvError>,
+{
+    match debugger.run_blocking::<GdbBlockingEventLoop<T>>(target) {
         Ok(disconnect_reason) => match disconnect_reason {
             DisconnectReason::Disconnect => log::info!("Gdb client disconnected"),
             DisconnectReason::TargetExited(code) => {
@@ -95,9 +102,9 @@ pub fn event_loop_thread(
             if e.is_target_error() {
                 log::error!("Target encountered a fatal error: {e:?}");
             } else if e.is_connection_error() {
-                log::error!("connection error: {:?}", e);
+                log::error!("connection error: {e:?}");
             } else {
-                log::error!("gdbstub got a fatal error {:?}", e);
+                log::error!("gdbstub got a fatal error: {e:?}");
             }
         }
     }

@@ -1,14 +1,16 @@
 mod event_loop;
-pub mod target;
+pub mod kvm_target;
 
+use std::io::{self, ErrorKind};
 use std::net::TcpListener;
 use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use event_loop::event_loop_thread;
+use gdbstub::arch::Arch;
 use gdbstub::conn::ConnectionExt;
-use gdbstub::stub::GdbStub;
-use target::HyperlightKvmSandboxTarget;
+use gdbstub::stub::{BaseStopReason, GdbStub};
+use gdbstub::target::Target;
 
 #[derive(Debug)]
 pub enum GdbTargetError {
@@ -21,20 +23,58 @@ pub enum GdbTargetError {
     CannotResume,
     SendMsgError,
     SetGuestDebugError,
-    SpawnThreadError,
     InvalidGva,
     UnexpectedMessageError,
     WriteRegistersError,
+    UnexpectedError,
+}
+
+impl From<io::Error> for GdbTargetError {
+    fn from(err: io::Error) -> Self {
+        match err.kind() {
+            ErrorKind::AddrInUse => Self::BindError,
+            ErrorKind::AddrNotAvailable => Self::BindError,
+            ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionRefused => Self::ListenerError,
+            _ => Self::UnexpectedError,
+        }
+    }
+}
+
+impl From<DebugMessage> for GdbTargetError {
+    fn from(value: DebugMessage) -> Self {
+        match value {
+            DebugMessage::VcpuStoppedEv => GdbTargetError::UnexpectedMessageError,
+            _ => GdbTargetError::UnexpectedMessageError,
+        }
+    }
+}
+
+impl From<TryRecvError> for GdbTargetError {
+    fn from(_value: TryRecvError) -> Self {
+        GdbTargetError::QueueError
+    }
 }
 
 /// Trait that provides common communication methods for targets
-pub trait GdbDebug {
+pub trait GdbDebug: Target {
     /// Sends a message to the Hypervisor
-    fn send(&self, ev: DebugMessage) -> Result<(), GdbTargetError>;
+    fn send(&self, ev: DebugMessage) -> Result<(), <Self as Target>::Error>;
     /// Waits for a message from the Hypervisor
-    fn recv(&self) -> Result<DebugMessage, GdbTargetError>;
+    fn recv(&self) -> Result<DebugMessage, <Self as Target>::Error>;
     /// Checks for a pending message from the Hypervisor
     fn try_recv(&self) -> Result<DebugMessage, TryRecvError>;
+
+    /// Marks the vCPU as paused
+    fn pause_vcpu(&mut self);
+    /// Resumes the vCPU
+    fn resume_vcpu(&mut self) -> Result<(), <Self as Target>::Error>;
+    /// Returns the reason why vCPU stopped
+    #[allow(clippy::type_complexity)]
+    fn get_stop_reason(
+        &self,
+    ) -> Result<Option<BaseStopReason<(), <Self::Arch as Arch>::Usize>>, Self::Error>;
 }
 
 /// Event sent to the VCPU execution loop
@@ -93,38 +133,52 @@ impl GdbConnection {
 }
 
 /// Creates a thread that handles gdb protocol
-pub fn create_gdb_thread(
-    mut target: HyperlightKvmSandboxTarget
-) -> Result<(), GdbTargetError> {
+pub fn create_gdb_thread<T: GdbDebug + Send + 'static>(
+    mut target: T,
+) -> Result<(), <T as Target>::Error>
+where
+    <T as Target>::Error:
+        std::fmt::Debug + Send + From<io::Error> + From<DebugMessage> + From<TryRecvError>,
+{
     // TODO: Address multiple sandboxes scenario
     let socket = format!("localhost:{}", 8081);
 
     log::info!("Listening on {:?}", socket);
-    let listener = TcpListener::bind(socket).map_err(|_| GdbTargetError::BindError)?;
+    let listener = TcpListener::bind(socket)?;
 
     log::info!("Starting GDB thread");
     let _handle = thread::Builder::new()
         .name("GDB handler".to_string())
-        .spawn(move || -> Result<(), GdbTargetError> {
-            log::info!("Waiting for GDB connection ... ");
-            let (conn, _) = listener
-                .accept()
-                .map_err(|_| GdbTargetError::ListenerError)?;
+        .spawn(
+            move || -> Result<(), <T as gdbstub::target::Target>::Error> {
+                let mut initial_conn = true;
+                let result = loop {
+                    log::info!("Waiting for GDB connection ... ");
+                    let (conn, _) = listener.accept().map_err(<T as Target>::Error::from)?;
 
-            let conn: Box<dyn ConnectionExt<Error = std::io::Error>> = Box::new(conn);
-            let debugger = GdbStub::new(conn);
+                    let conn: Box<dyn ConnectionExt<Error = io::Error>> = Box::new(conn);
+                    let debugger = GdbStub::new(conn);
 
-            if let DebugMessage::VcpuStoppedEv = target.recv()? {
-                target.pause_vcpu();
+                    if initial_conn {
+                        // Waits for vCPU to stop at entrypoint breakpoint
+                        let res = target.recv()?;
+                        if let DebugMessage::VcpuStoppedEv = res {
+                            target.pause_vcpu();
 
-                event_loop_thread(debugger, target);
+                            event_loop_thread(debugger, &mut target);
+                            initial_conn = false;
+                        } else {
+                            break Err(res)?;
+                        }
+                    } else {
+                        log::info!("Reattaching GDB connection ... ");
+                        event_loop_thread(debugger, &mut target);
+                    }
+                };
 
-                Ok(())
-            } else {
-                Err(GdbTargetError::UnexpectedMessageError)
-            }
-        })
-        .map_err(|_| GdbTargetError::SpawnThreadError)?;
+                result
+            },
+        );
 
     Ok(())
 }
