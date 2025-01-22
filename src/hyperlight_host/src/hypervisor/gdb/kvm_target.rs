@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::TryRecvError;
@@ -10,7 +11,7 @@ use gdbstub::target::ext::base::singlethread::{
 };
 use gdbstub::target::ext::base::BaseOps;
 use gdbstub::target::ext::breakpoints::{
-    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps,
+    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
 };
 use gdbstub::target::ext::section_offsets::{Offsets, SectionOffsets};
 use gdbstub::target::{Target, TargetError, TargetResult};
@@ -19,7 +20,7 @@ use gdbstub_arch::x86::X86_64_SSE as GdbTargetArch;
 use hyperlight_common::mem::PAGE_SIZE;
 use kvm_bindings::{
     kvm_guest_debug, kvm_regs, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP,
-    KVM_GUESTDBG_USE_HW_BP,
+    KVM_GUESTDBG_USE_HW_BP, KVM_GUESTDBG_USE_SW_BP,
 };
 use kvm_ioctls::VcpuFd;
 
@@ -28,6 +29,13 @@ use crate::hypervisor::gdb::{DebugMessage, GdbDebug};
 use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::{GuestSharedMemory, SharedMemory};
+
+/// Software Breakpoint size in memory
+const SW_BP_SIZE: usize = 1;
+/// Software Breakpoinnt opcode
+const SW_BP_OP: u8 = 0xCC;
+/// Software Breakpoint written to memory
+const SW_BP: [u8; SW_BP_SIZE] = [SW_BP_OP];
 
 /// KVM Debug struct
 /// This struct is used to abstract the internal details of the kvm
@@ -42,7 +50,7 @@ impl KvmDebug {
 
     pub fn new() -> Self {
         let dbg = kvm_guest_debug {
-            control: KVM_GUESTDBG_ENABLE,
+            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP,
             ..Default::default()
         };
 
@@ -106,6 +114,8 @@ pub struct HyperlightKvmSandboxTarget {
 
     /// Array of addresses for HW breakpoints
     hw_breakpoints: Vec<u64>,
+    /// Array of addresses for SW breakpoints
+    sw_breakpoints: HashMap<u64, [u8; SW_BP_SIZE]>,
 
     /// Hypervisor communication channels
     hyp_conn: GdbConnection,
@@ -130,6 +140,7 @@ impl HyperlightKvmSandboxTarget {
             single_step: false,
 
             hw_breakpoints: vec![],
+            sw_breakpoints: HashMap::new(),
 
             hyp_conn,
         }
@@ -437,6 +448,9 @@ impl Breakpoints for HyperlightKvmSandboxTarget {
     fn support_hw_breakpoint(&mut self) -> Option<HwBreakpointOps<Self>> {
         Some(self)
     }
+    fn support_sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
+        Some(self)
+    }
 }
 
 impl HwBreakpoint for HyperlightKvmSandboxTarget {
@@ -496,6 +510,55 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
     }
 }
 
+impl SwBreakpoint for HyperlightKvmSandboxTarget {
+    /// Adds a software breakpoint by setting a specific operation code at the
+    /// address so when the vCPU hits it, it knows it is a software breakpoint.
+    ///
+    /// The existing data at the address is saved so it can be restored when
+    /// removing the breakpoint
+    fn add_sw_breakpoint(
+        &mut self,
+        addr: <Self::Arch as Arch>::Usize,
+        _kind: <Self::Arch as Arch>::BreakpointKind,
+    ) -> TargetResult<bool, Self> {
+        log::debug!("Add sw breakpoint at address {:X}", addr);
+        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+
+        if self.sw_breakpoints.contains_key(&addr) {
+            return Ok(true);
+        }
+
+        let mut save_data = [0u8; SW_BP_SIZE];
+        self.read_addrs(addr, &mut save_data)?;
+        self.write_addrs(addr, &SW_BP)?;
+
+        self.sw_breakpoints.insert(addr, save_data);
+
+        Ok(true)
+    }
+
+    /// Removes a software breakpoint by restoring the saved data at the corresponding
+    /// address
+    fn remove_sw_breakpoint(
+        &mut self,
+        addr: <Self::Arch as Arch>::Usize,
+        _kind: <Self::Arch as Arch>::BreakpointKind,
+    ) -> TargetResult<bool, Self> {
+        log::debug!("Remove sw breakpoint at address {:X}", addr);
+
+        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+
+        if self.sw_breakpoints.contains_key(&addr) {
+            let save_data = self
+                .sw_breakpoints
+                .remove(&addr)
+                .expect("Expected the hashmap to contain the address");
+            self.write_addrs(addr, &save_data)?;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 }
 
