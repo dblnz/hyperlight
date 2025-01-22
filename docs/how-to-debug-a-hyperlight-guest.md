@@ -1,7 +1,7 @@
 # How to debug a Hyperlight guest
 
-Currently Hyperlight support gdb debugging of a guest running inside a Hyperlight sandbox.
-When the option is enabled Hyperlight starts listening on port `8081` for a gdb connection.
+Hyperlight supports gdb debugging of a guest running inside a Hyperlight sandbox.
+When Hyperlight is compiled with the `gdb` feature enabled, Hyperlight starts listening on port `8081` for a gdb connection.
 
 Note: It will only accept one connection, if the connection is closed, the debug session is also closed.
 
@@ -14,7 +14,7 @@ The execution will wait for gdb to attach.
 One can use a simple gdb config to provide the symbols and desired configuration:
 
 For the above example, when running from the repository root directory, the below contents
-of `.gdbinit` file can be used.
+of `.gdbinit` file can be used to provide configuration to gdb startup.
 ```gdb
 file src/tests/rust_guests/bin/debug/simpleguest
 target remote :8081
@@ -24,3 +24,5 @@ enable pretty-printer
 layout regs
 layout src
 ```
+
+One can find more information about the `.gdbinit` file at [gdbinit(5)](https://www.man7.org/linux/man-pages/man5/gdbinit.5.html).
