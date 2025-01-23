@@ -363,7 +363,7 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
 
         let mut mgr = self.mgr.lock().unwrap();
         while !data.is_empty() {
-            let gpa = self.translate_gva(gva).map_err(TargetError::Fatal)?;
+            let gpa = self.translate_gva(gva).map_err(|_| TargetError::NonFatal)?;
 
             let read_len = std::cmp::min(
                 data.len(),
@@ -392,7 +392,7 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
 
         let mut mgr = self.mgr.lock().unwrap();
         while !data.is_empty() {
-            let gpa = self.translate_gva(gva).map_err(TargetError::Fatal)?;
+            let gpa = self.translate_gva(gva).map_err(|_| TargetError::NonFatal)?;
 
             let write_len = std::cmp::min(
                 data.len(),
