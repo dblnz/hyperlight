@@ -161,8 +161,12 @@ impl KVMDriver {
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn run_once(&mut self) -> Result<HyperlightExit> {
-        let result = match self.vcpu_fd.lock().unwrap().run() {
+        // Make sure vcpu_fd lock is dropped before formatting self for debug
+        // as it will try to acquire the lock again and end up in a deadlock
+        let mut vcpu_fd = self.vcpu_fd.lock().unwrap();
+        let result = match vcpu_fd.run() {
             Ok(VcpuExit::Hlt) => {
+                drop(vcpu_fd);
                 crate::debug!("KVM - Halt Details : {:#?}", &self);
                 HyperlightExit::Halt()
             }
@@ -173,6 +177,7 @@ impl KVMDriver {
                 HyperlightExit::IoOut(port, data.to_vec(), 0, 0)
             }
             Ok(VcpuExit::MmioRead(addr, _)) => {
+                drop(vcpu_fd);
                 crate::debug!("KVM MMIO Read -Details: Address: {} \n {:#?}", addr, &self);
 
                 match self.get_memory_access_violation(
@@ -185,6 +190,7 @@ impl KVMDriver {
                 }
             }
             Ok(VcpuExit::MmioWrite(addr, _)) => {
+                drop(vcpu_fd);
                 crate::debug!("KVM MMIO Write -Details: Address: {} \n {:#?}", addr, &self);
 
                 match self.get_memory_access_violation(
@@ -203,6 +209,7 @@ impl KVMDriver {
                 libc::EINTR => HyperlightExit::Cancelled(),
                 libc::EAGAIN => HyperlightExit::Retry(),
                 _ => {
+                    drop(vcpu_fd);
                     crate::debug!("KVM Error -Details: Address: {} \n {:#?}", e, &self);
                     log_then_return!("Error running VCPU {:?}", e);
                 }
