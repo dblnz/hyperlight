@@ -16,7 +16,9 @@ limitations under the License.
 
 use std::convert::TryFrom;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
+#[cfg(gdb)]
+use std::sync::Mutex;
 
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_userspace_memory_region, KVM_MEM_READONLY};
 use kvm_ioctls::Cap::UserMemory;
@@ -64,7 +66,7 @@ pub(crate) fn is_hypervisor_present() -> bool {
 pub(super) struct KVMDriver {
     _kvm: Kvm,
     _vm_fd: VmFd,
-    vcpu_fd: Arc<Mutex<VcpuFd>>,
+    vcpu_fd: Arc<RwLock<VcpuFd>>,
     entrypoint: u64,
     orig_rsp: GuestPtr,
     mem_regions: Vec<MemoryRegion>,
@@ -110,7 +112,7 @@ impl KVMDriver {
         let mut vcpu_fd = vm_fd.create_vcpu(0)?;
         Self::setup_initial_sregs(&mut vcpu_fd, pml4_addr)?;
 
-        let vcpu_fd = Arc::new(Mutex::new(vcpu_fd));
+        let vcpu_fd = Arc::new(RwLock::new(vcpu_fd));
         #[cfg(gdb)]
         let gdb_conn = Self::enable_gdb_debug(mgr, vcpu_fd.clone(), entrypoint)?;
 
@@ -131,7 +133,7 @@ impl KVMDriver {
     #[cfg(gdb)]
     fn enable_gdb_debug(
         mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
-        vcpu_fd: Arc<Mutex<VcpuFd>>,
+        vcpu_fd: Arc<RwLock<VcpuFd>>,
         entrypoint: u64,
     ) -> Result<GdbConnection> {
         let (gdb_conn, hyp_conn) = GdbConnection::new_pair();
@@ -163,7 +165,7 @@ impl KVMDriver {
     fn run_once(&mut self) -> Result<HyperlightExit> {
         // Make sure vcpu_fd lock is dropped before formatting self for debug
         // as it will try to acquire the lock again and end up in a deadlock
-        let mut vcpu_fd = self.vcpu_fd.lock().unwrap();
+        let mut vcpu_fd = self.vcpu_fd.write().unwrap();
         let result = match vcpu_fd.run() {
             Ok(VcpuExit::Hlt) => {
                 drop(vcpu_fd);
@@ -232,14 +234,16 @@ impl Debug for KVMDriver {
         for region in &self.mem_regions {
             f.field("Memory Region", &region);
         }
-        let regs = self.vcpu_fd.lock().unwrap().get_regs();
+        let vcpu_fd = self.vcpu_fd.read().unwrap();
+
+        let regs = vcpu_fd.get_regs();
         // check that regs is OK and then set field in debug struct
 
         if let Ok(regs) = regs {
             f.field("Registers", &regs);
         }
 
-        let sregs = self.vcpu_fd.lock().unwrap().get_sregs();
+        let sregs = vcpu_fd.get_sregs();
 
         // check that sregs is OK and then set field in debug struct
 
@@ -275,7 +279,7 @@ impl Hypervisor for KVMDriver {
 
             ..Default::default()
         };
-        self.vcpu_fd.lock().unwrap().set_regs(&regs)?;
+        self.vcpu_fd.read().unwrap().set_regs(&regs)?;
 
         VirtualCPU::run(
             self.as_mut_hypervisor(),
@@ -285,7 +289,7 @@ impl Hypervisor for KVMDriver {
         )?;
 
         // reset RSP to what it was before initialise
-        self.vcpu_fd.lock().unwrap().set_regs(&kvm_regs {
+        self.vcpu_fd.read().unwrap().set_regs(&kvm_regs {
             rsp: self.orig_rsp.absolute()?,
             ..Default::default()
         })?;
@@ -301,22 +305,29 @@ impl Hypervisor for KVMDriver {
         hv_handler: Option<HypervisorHandler>,
     ) -> Result<()> {
         // Reset general purpose registers except RSP, then set RIP
-        let rsp_before = self.vcpu_fd.lock().unwrap().get_regs()?.rsp;
-        let regs = kvm_regs {
-            rip: dispatch_func_addr.clone().into(),
-            rsp: rsp_before,
-            ..Default::default()
-        };
-        self.vcpu_fd.lock().unwrap().set_regs(&regs)?;
+        let rsp_before = {
+            let vcpu_fd = self.vcpu_fd.read().unwrap();
 
-        // reset fpu state
-        let fpu = kvm_fpu {
-            fcw: FP_CONTROL_WORD_DEFAULT,
-            ftwx: FP_TAG_WORD_DEFAULT,
-            mxcsr: MXCSR_DEFAULT,
-            ..Default::default() // zero out the rest
+            let rsp_before = vcpu_fd.get_regs()?.rsp;
+            let regs = kvm_regs {
+                rip: dispatch_func_addr.clone().into(),
+                rsp: rsp_before,
+                ..Default::default()
+            };
+            vcpu_fd.set_regs(&regs)?;
+
+            // reset fpu state
+            let fpu = kvm_fpu {
+                fcw: FP_CONTROL_WORD_DEFAULT,
+                ftwx: FP_TAG_WORD_DEFAULT,
+                mxcsr: MXCSR_DEFAULT,
+                ..Default::default() // zero out the rest
+            };
+
+            vcpu_fd.set_fpu(&fpu)?;
+
+            rsp_before
         };
-        self.vcpu_fd.lock().unwrap().set_fpu(&fpu)?;
 
         // run
         VirtualCPU::run(
@@ -327,7 +338,7 @@ impl Hypervisor for KVMDriver {
         )?;
 
         // reset RSP to what it was before function call
-        self.vcpu_fd.lock().unwrap().set_regs(&kvm_regs {
+        self.vcpu_fd.read().unwrap().set_regs(&kvm_regs {
             rsp: rsp_before,
             ..Default::default()
         })?;

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crossbeam_channel::TryRecvError;
 use gdbstub::arch::Arch;
@@ -100,7 +100,7 @@ pub struct HyperlightKvmSandboxTarget {
     /// Memory manager that grants access to guest's memory
     mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
     /// VcpuFd for access to vCPU state
-    vcpu_fd: Arc<Mutex<VcpuFd>>,
+    vcpu_fd: Arc<RwLock<VcpuFd>>,
     /// Guest entrypoint
     entrypoint: u64,
 
@@ -124,7 +124,7 @@ pub struct HyperlightKvmSandboxTarget {
 impl HyperlightKvmSandboxTarget {
     pub fn new(
         mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
-        vcpu_fd: Arc<Mutex<VcpuFd>>,
+        vcpu_fd: Arc<RwLock<VcpuFd>>,
         entrypoint: u64,
         hyp_conn: GdbConnection,
     ) -> Self {
@@ -150,7 +150,7 @@ impl HyperlightKvmSandboxTarget {
     fn get_instruction_pointer(&self) -> Result<u64, GdbTargetError> {
         let regs = self
             .vcpu_fd
-            .lock()
+            .read()
             .unwrap()
             .get_regs()
             .map_err(|_| GdbTargetError::InstructionPointerError)?;
@@ -162,7 +162,7 @@ impl HyperlightKvmSandboxTarget {
         self.single_step = enable;
 
         self.debug
-            .set_breakpoints(&self.vcpu_fd.lock().unwrap(), &self.hw_breakpoints, enable)?;
+            .set_breakpoints(&self.vcpu_fd.read().unwrap(), &self.hw_breakpoints, enable)?;
 
         Ok(())
     }
@@ -171,14 +171,14 @@ impl HyperlightKvmSandboxTarget {
     /// it does not keep this breakpoint set after the vcpu already stopped at the address
     pub fn set_entrypoint_bp(&mut self) -> Result<bool, GdbTargetError> {
         let mut entrypoint_debug = KvmDebug::new();
-        entrypoint_debug.set_breakpoints(&self.vcpu_fd.lock().unwrap(), &[self.entrypoint], false)
+        entrypoint_debug.set_breakpoints(&self.vcpu_fd.read().unwrap(), &[self.entrypoint], false)
     }
 
     /// Translates the guest address to physical address
     fn translate_gva(&self, gva: u64) -> Result<u64, GdbTargetError> {
         let tr = self
             .vcpu_fd
-            .lock()
+            .read()
             .unwrap()
             .translate_gva(gva)
             .map_err(|_| GdbTargetError::InvalidGva(gva))?;
@@ -194,7 +194,7 @@ impl HyperlightKvmSandboxTarget {
         log::debug!("Read registers");
         let vcpu_regs = self
             .vcpu_fd
-            .lock()
+            .read()
             .unwrap()
             .get_regs()
             .map_err(|_| GdbTargetError::ReadRegistersError)?;
@@ -249,7 +249,7 @@ impl HyperlightKvmSandboxTarget {
         };
 
         self.vcpu_fd
-            .lock()
+            .read()
             .unwrap()
             .set_regs(&new_regs)
             .map_err(|_| GdbTargetError::WriteRegistersError)
@@ -474,8 +474,7 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
         } else {
             self.hw_breakpoints.push(addr);
             self.debug
-                .set_breakpoints(&self.vcpu_fd.lock().unwrap(), &self.hw_breakpoints, false)
-                .map_err(TargetError::Fatal)?;
+                .set_breakpoints(&self.vcpu_fd.read().unwrap(), &self.hw_breakpoints, false)?;
 
             Ok(true)
         }
@@ -497,8 +496,7 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
             self.hw_breakpoints.copy_within(index + 1.., index);
             self.hw_breakpoints.pop();
             self.debug
-                .set_breakpoints(&self.vcpu_fd.lock().unwrap(), &self.hw_breakpoints, false)
-                .map_err(TargetError::Fatal)?;
+                .set_breakpoints(&self.vcpu_fd.read().unwrap(), &self.hw_breakpoints, false)?;
 
             Ok(true)
         } else {
