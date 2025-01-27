@@ -14,7 +14,7 @@ use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
 };
 use gdbstub::target::ext::section_offsets::{Offsets, SectionOffsets};
-use gdbstub::target::{Target, TargetError, TargetResult};
+use gdbstub::target::{Target, TargetResult};
 use gdbstub_arch::x86::reg::X86_64CoreRegs;
 use gdbstub_arch::x86::X86_64_SSE as GdbTargetArch;
 use hyperlight_common::mem::PAGE_SIZE;
@@ -181,10 +181,10 @@ impl HyperlightKvmSandboxTarget {
             .lock()
             .unwrap()
             .translate_gva(gva)
-            .map_err(|_| GdbTargetError::InvalidGva)?;
+            .map_err(|_| GdbTargetError::InvalidGva(gva))?;
 
         if tr.valid == 0 {
-            Err(GdbTargetError::InvalidGva)
+            Err(GdbTargetError::InvalidGva(gva))
         } else {
             Ok(tr.physical_address)
         }
@@ -279,13 +279,10 @@ impl GdbDebug for HyperlightKvmSandboxTarget {
         if self.paused {
             log::info!("Attempted to resume paused vCPU");
 
-            self.send(DebugMessage::VcpuResumeEv)
-                .map_err(|_| GdbTargetError::CannotResume)?;
+            self.send(DebugMessage::VcpuResumeEv)?;
 
-            // TODO: Maybe add timeout here because if the confirmation is not
-            // sent right away, it means something is not right
-            let response = self.recv().map_err(|_| GdbTargetError::CannotResume)?;
-            log::info!("Got message {:?}", response);
+            let response = self.recv()?;
+            log::debug!("Got message {:?}", response);
 
             if let DebugMessage::RspOk = response {
                 self.paused = false;
@@ -303,10 +300,7 @@ impl GdbDebug for HyperlightKvmSandboxTarget {
         &self,
     ) -> Result<Option<BaseStopReason<(), <Self::Arch as Arch>::Usize>>, Self::Error> {
         if self.single_step {
-            return Ok(Some(SingleThreadStopReason::SignalWithThread {
-                tid: (),
-                signal: Signal::SIGTRAP,
-            }));
+            return Ok(Some(SingleThreadStopReason::DoneStep));
         }
 
         let ip = self.get_instruction_pointer()?;
@@ -363,7 +357,7 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
 
         let mut mgr = self.mgr.lock().unwrap();
         while !data.is_empty() {
-            let gpa = self.translate_gva(gva).map_err(|_| TargetError::NonFatal)?;
+            let gpa = self.translate_gva(gva)?;
 
             let read_len = std::cmp::min(
                 data.len(),
@@ -392,7 +386,7 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
 
         let mut mgr = self.mgr.lock().unwrap();
         while !data.is_empty() {
-            let gpa = self.translate_gva(gva).map_err(|_| TargetError::NonFatal)?;
+            let gpa = self.translate_gva(gva)?;
 
             let write_len = std::cmp::min(
                 data.len(),
@@ -415,14 +409,18 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
         &mut self,
         regs: &mut <Self::Arch as Arch>::Registers,
     ) -> TargetResult<(), Self> {
-        self.read_regs(regs).map_err(TargetError::Fatal)
+        self.read_regs(regs)?;
+
+        Ok(())
     }
 
     fn write_registers(
         &mut self,
         regs: &<Self::Arch as Arch>::Registers,
     ) -> TargetResult<(), Self> {
-        self.write_regs(regs).map_err(TargetError::Fatal)
+        self.write_regs(regs)?;
+
+        Ok(())
     }
 
     fn support_resume(&mut self) -> Option<SingleThreadResumeOps<Self>> {
@@ -467,7 +465,7 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Add hw breakpoint at address {:X}", addr);
 
-        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+        let addr = self.translate_gva(addr)?;
 
         if self.hw_breakpoints.contains(&addr) {
             Ok(true)
@@ -492,7 +490,7 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Remove hw breakpoint at address {:X}", addr);
 
-        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+        let addr = self.translate_gva(addr)?;
 
         if self.hw_breakpoints.contains(&addr) {
             let index = self.hw_breakpoints.iter().position(|a| *a == addr).unwrap();
@@ -521,7 +519,7 @@ impl SwBreakpoint for HyperlightKvmSandboxTarget {
         _kind: <Self::Arch as Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
         log::debug!("Add sw breakpoint at address {:X}", addr);
-        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+        let addr = self.translate_gva(addr)?;
 
         if self.sw_breakpoints.contains_key(&addr) {
             return Ok(true);
@@ -545,7 +543,7 @@ impl SwBreakpoint for HyperlightKvmSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Remove sw breakpoint at address {:X}", addr);
 
-        let addr = self.translate_gva(addr).map_err(TargetError::Fatal)?;
+        let addr = self.translate_gva(addr)?;
 
         if self.sw_breakpoints.contains_key(&addr) {
             let save_data = self

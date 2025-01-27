@@ -10,22 +10,36 @@ use event_loop::event_loop_thread;
 use gdbstub::arch::Arch;
 use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::{BaseStopReason, GdbStub};
-use gdbstub::target::Target;
+use gdbstub::target::{Target, TargetError};
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum GdbTargetError {
+    #[error("Bind Error")]
     BindError,
+    #[error("Instruction pointer error")]
     InstructionPointerError,
+    #[error("Instruction pointer error")]
     ListenerError,
-    QueueError,
+    #[error("Target finished running: {0}")]
+    TargetFinished(String),
+    #[error("Error encountered when reading registers")]
     ReadRegistersError,
+    #[error("Error encountered when waiting to receive message")]
     ReceiveMsgError,
+    #[error("Error encountered when resuming vCPU")]
     CannotResume,
+    #[error("Error encountered when sending message")]
     SendMsgError,
+    #[error("Error encountered when setting guest debug")]
     SetGuestDebugError,
-    InvalidGva,
+    #[error("Invalid guest virtual address: {0}")]
+    InvalidGva(u64),
+    #[error("Encountered an unexpected message over communication channel")]
     UnexpectedMessageError,
+    #[error("Error encountered when writing registers")]
     WriteRegistersError,
+    #[error("Unexpected error encountered")]
     UnexpectedError,
 }
 
@@ -48,9 +62,15 @@ impl From<DebugMessage> for GdbTargetError {
     }
 }
 
-impl From<TryRecvError> for GdbTargetError {
-    fn from(_value: TryRecvError) -> Self {
-        GdbTargetError::QueueError
+impl From<GdbTargetError> for TargetError<GdbTargetError> {
+    fn from(value: GdbTargetError) -> TargetError<GdbTargetError> {
+        match value {
+            GdbTargetError::InvalidGva(_) => TargetError::NonFatal,
+            e @ GdbTargetError::SetGuestDebugError | 
+            e @ GdbTargetError::InstructionPointerError =>
+                TargetError::Fatal(e),
+            _ => TargetError::Io(std::io::Error::other(value)),
+        }
     }
 }
 
@@ -135,7 +155,7 @@ pub fn create_gdb_thread<T: GdbDebug + Send + 'static>(
 ) -> Result<(), <T as Target>::Error>
 where
     <T as Target>::Error:
-        std::fmt::Debug + Send + From<io::Error> + From<DebugMessage> + From<TryRecvError>,
+        std::fmt::Debug + Send + From<io::Error> + From<DebugMessage>,
 {
     let socket = format!("localhost:{}", 8081);
 
@@ -150,7 +170,7 @@ where
                 let mut initial_conn = true;
                 let result = loop {
                     log::info!("Waiting for GDB connection ... ");
-                    let (conn, _) = listener.accept().map_err(<T as Target>::Error::from)?;
+                    let (conn, _) = listener.accept()?;
 
                     let conn: Box<dyn ConnectionExt<Error = io::Error>> = Box::new(conn);
                     let debugger = GdbStub::new(conn);

@@ -4,7 +4,7 @@ use gdbstub::arch::Arch;
 use gdbstub::common::Signal;
 use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::run_blocking::{self, WaitForStopReasonError};
-use gdbstub::stub::{DisconnectReason, GdbStub, SingleThreadStopReason};
+use gdbstub::stub::{BaseStopReason, DisconnectReason, GdbStub, SingleThreadStopReason};
 use gdbstub::target::Target;
 
 use crate::hypervisor::gdb::GdbDebug;
@@ -13,10 +13,7 @@ pub struct GdbBlockingEventLoop<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T>
-where
-    <T as Target>::Error: From<crossbeam_channel::TryRecvError>,
-{
+impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T> {
     type Connection = Box<dyn ConnectionExt<Error = std::io::Error>>;
     type StopReason = SingleThreadStopReason<<T::Arch as Arch>::Usize>;
     type Target = T;
@@ -53,8 +50,8 @@ where
                     return Ok(run_blocking::Event::TargetStopped(stop_response));
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => (),
-                Err(e) => {
-                    return Err(run_blocking::WaitForStopReasonError::Target(e.into()));
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    return Ok(run_blocking::Event::TargetStopped(BaseStopReason::Exited(0)));
                 }
             }
 
@@ -85,27 +82,20 @@ pub fn event_loop_thread<T: GdbDebug>(
     target: &mut T,
 ) where
     <T as Target>::Error: std::fmt::Debug,
-    <T as Target>::Error: From<crossbeam_channel::TryRecvError>,
 {
     match debugger.run_blocking::<GdbBlockingEventLoop<T>>(target) {
         Ok(disconnect_reason) => match disconnect_reason {
             DisconnectReason::Disconnect => log::info!("Gdb client disconnected"),
-            DisconnectReason::TargetExited(code) => {
-                log::info!("Gdb target exited with code {}", code)
+            DisconnectReason::TargetExited(_) => {
+                log::info!("Guest finalized execution and disconnected");
             }
             DisconnectReason::TargetTerminated(sig) => {
-                log::info!("Gdb target terminated with signale {}", sig)
+                log::info!("Gdb target terminated with signal {}", sig)
             }
             DisconnectReason::Kill => log::info!("Gdb sent a kill command"),
         },
         Err(e) => {
-            if e.is_target_error() {
-                log::error!("Target encountered a fatal error: {e:?}");
-            } else if e.is_connection_error() {
-                log::error!("connection error: {e:?}");
-            } else {
-                log::error!("gdbstub got a fatal error: {e:?}");
-            }
+            log::error!("fatal error encountered: {e:?}");
         }
     }
 }
