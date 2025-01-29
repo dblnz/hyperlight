@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crossbeam_channel::TryRecvError;
-use gdbstub::arch::Arch;
+use gdbstub::arch::{Arch, BreakpointKind};
 use gdbstub::common::Signal;
 use gdbstub::stub::{BaseStopReason, SingleThreadStopReason};
 use gdbstub::target::ext::base::singlethread::{
@@ -40,6 +40,7 @@ const SW_BP: [u8; SW_BP_SIZE] = [SW_BP_OP];
 /// KVM Debug struct
 /// This struct is used to abstract the internal details of the kvm
 /// guest debugging settings
+#[derive(Default)]
 struct KvmDebug {
     /// Sent to KVM for enabling guest debug
     pub debug: kvm_guest_debug,
@@ -271,6 +272,23 @@ impl GdbDebug for HyperlightKvmSandboxTarget {
 
     fn pause_vcpu(&mut self) {
         self.paused = true;
+    }
+
+    fn disable_debug(&mut self) -> Result<bool, Self::Error> {
+        self.debug = KvmDebug::default();
+
+        self.pause_vcpu();
+        self.hw_breakpoints = vec![];
+
+        let sw_bp_addr: Vec<u64> = self.sw_breakpoints.keys().into_iter().map(|a| *a).collect();
+
+        for addr in sw_bp_addr {
+            let _ = self.remove_sw_breakpoint(addr, BreakpointKind::from_usize(0).unwrap());
+        }
+        self.sw_breakpoints = HashMap::new();
+
+        let _ = self.set_single_step(false);
+        self.debug.set_breakpoints(&self.vcpu_fd.read().unwrap(), &[], false)
     }
 
     /// Sends an event to the Hypervisor that tells it to resume vCPU execution

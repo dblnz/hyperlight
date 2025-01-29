@@ -83,6 +83,8 @@ pub trait GdbDebug: Target {
     /// Checks for a pending message from the Hypervisor
     fn try_recv(&self) -> Result<DebugMessage, TryRecvError>;
 
+    /// Disables debug
+    fn disable_debug(&mut self) -> Result<bool, <Self as Target>::Error>;
     /// Marks the vCPU as paused
     fn pause_vcpu(&mut self);
     /// Resumes the vCPU
@@ -167,33 +169,26 @@ where
         .name("GDB handler".to_string())
         .spawn(
             move || -> Result<(), <T as gdbstub::target::Target>::Error> {
-                let mut initial_conn = true;
-                let result = loop {
-                    log::info!("Waiting for GDB connection ... ");
-                    let (conn, _) = listener.accept()?;
+                log::info!("Waiting for GDB connection ... ");
+                let (conn, _) = listener.accept()?;
 
-                    let conn: Box<dyn ConnectionExt<Error = io::Error>> = Box::new(conn);
-                    let debugger = GdbStub::new(conn);
+                let conn: Box<dyn ConnectionExt<Error = io::Error>> = Box::new(conn);
+                let debugger = GdbStub::new(conn);
 
-                    if initial_conn {
-                        // Waits for vCPU to stop at entrypoint breakpoint
-                        let res = target.recv()?;
-                        if let DebugMessage::VcpuStoppedEv = res {
-                            target.pause_vcpu();
+                // Waits for vCPU to stop at entrypoint breakpoint
+                let res = target.recv()?;
+                if let DebugMessage::VcpuStoppedEv = res {
+                    target.pause_vcpu();
 
-                            event_loop_thread(debugger, &mut target);
-                            initial_conn = false;
-                        } else {
-                            break Err(res)?;
-                        }
-                    } else {
-                        log::info!("Reattaching GDB connection ... ");
-                        event_loop_thread(debugger, &mut target);
-                    }
-                };
+                    event_loop_thread(debugger, &mut target);
+                }
 
-                result
-            },
+                if target.disable_debug()? {
+                    target.resume_vcpu()?;
+                }
+
+                Ok(())
+            }
         );
 
     Ok(())

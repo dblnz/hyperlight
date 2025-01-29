@@ -390,8 +390,8 @@ impl Hypervisor for KVMDriver {
                     log::debug!("Debug wait for event to resume vCPU");
                     if let Ok(ev) = self.gdb_conn.recv() {
                         match ev {
-                            DebugMessage::VcpuResumeEv => {
-                                log::debug!("Debug got event -> resuming vCPU");
+                            ev @ DebugMessage::VcpuResumeEv => {
+                                log::debug!("Hypervisor received event {:?}", ev);
                                 self.gdb_conn.send(DebugMessage::RspOk).map_err(|e| {
                                     new_error!(
                                         "Couldn't signal vCPU event received to GDB
@@ -404,7 +404,7 @@ impl Hypervisor for KVMDriver {
                                 continue;
                             }
                             e => {
-                                log::debug!("Debug got event {:?}", e);
+                                log::debug!("Hypervisor received event {:?}", e);
                                 self.gdb_conn.send(DebugMessage::RspErr).map_err(|e| {
                                     new_error!("Couldn't signal error to GDB thread: {:?}", e)
                                 })?;
