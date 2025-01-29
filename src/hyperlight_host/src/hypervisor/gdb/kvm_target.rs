@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
 
 use crossbeam_channel::TryRecvError;
-use gdbstub::arch::{Arch, BreakpointKind};
+use gdbstub::arch::Arch;
 use gdbstub::common::Signal;
-use gdbstub::stub::{BaseStopReason, SingleThreadStopReason};
+use gdbstub::stub::SingleThreadStopReason;
 use gdbstub::target::ext::base::singlethread::{
     SingleThreadBase, SingleThreadResume, SingleThreadResumeOps, SingleThreadSingleStep,
     SingleThreadSingleStepOps,
@@ -14,332 +12,76 @@ use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, SwBreakpoint, SwBreakpointOps,
 };
 use gdbstub::target::ext::section_offsets::{Offsets, SectionOffsets};
-use gdbstub::target::{Target, TargetResult};
-use gdbstub_arch::x86::reg::X86_64CoreRegs;
+use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::X86_64_SSE as GdbTargetArch;
-use hyperlight_common::mem::PAGE_SIZE;
-use kvm_bindings::{
-    kvm_guest_debug, kvm_regs, KVM_GUESTDBG_ENABLE, KVM_GUESTDBG_SINGLESTEP,
-    KVM_GUESTDBG_USE_HW_BP, KVM_GUESTDBG_USE_SW_BP,
-};
-use kvm_ioctls::VcpuFd;
 
-use super::{GdbConnection, GdbTargetError};
-use crate::hypervisor::gdb::{DebugMessage, GdbDebug};
-use crate::mem::layout::SandboxMemoryLayout;
-use crate::mem::mgr::SandboxMemoryManager;
-use crate::mem::shared_mem::{GuestSharedMemory, SharedMemory};
+use super::{DebugAction, GdbConnection, GdbTargetError, VcpuStopReason, X86_64Regs};
+use crate::hypervisor::gdb::GdbDebug;
 
-/// Software Breakpoint size in memory
-const SW_BP_SIZE: usize = 1;
-/// Software Breakpoinnt opcode
-const SW_BP_OP: u8 = 0xCC;
-/// Software Breakpoint written to memory
-const SW_BP: [u8; SW_BP_SIZE] = [SW_BP_OP];
-
-/// KVM Debug struct
-/// This struct is used to abstract the internal details of the kvm
-/// guest debugging settings
-#[derive(Default)]
-struct KvmDebug {
-    /// Sent to KVM for enabling guest debug
-    pub debug: kvm_guest_debug,
-}
-
-impl KvmDebug {
-    const MAX_NO_OF_HW_BP: usize = 4;
-
-    pub fn new() -> Self {
-        let dbg = kvm_guest_debug {
-            control: KVM_GUESTDBG_ENABLE | KVM_GUESTDBG_USE_SW_BP,
-            ..Default::default()
-        };
-
-        Self { debug: dbg }
-    }
-
-    /// Method to set the kvm debugreg fields for breakpoints
-    /// The maximum number of supported breakpoints is `Self::MAX_NO_OF_HW_BP`
-    pub fn set_breakpoints(
-        &mut self,
-        vcpu_fd: &VcpuFd,
-        addrs: &[u64],
-        step: bool,
-    ) -> Result<bool, GdbTargetError> {
-        if addrs.len() >= Self::MAX_NO_OF_HW_BP {
-            return Ok(false);
-        }
-
-        self.debug.arch.debugreg = [0; 8];
-        for (k, addr) in addrs.iter().enumerate() {
-            self.debug.arch.debugreg[k] = *addr;
-            self.debug.arch.debugreg[7] |= 1 << (k * 2);
-        }
-
-        if !addrs.is_empty() {
-            self.debug.control |= KVM_GUESTDBG_USE_HW_BP;
-        } else {
-            self.debug.control &= !KVM_GUESTDBG_USE_HW_BP;
-        }
-
-        if step {
-            self.debug.control |= KVM_GUESTDBG_SINGLESTEP;
-        } else {
-            self.debug.control &= !KVM_GUESTDBG_SINGLESTEP;
-        }
-
-        vcpu_fd
-            .set_guest_debug(&self.debug)
-            .map_err(|_| GdbTargetError::SetGuestDebugError)?;
-
-        Ok(true)
-    }
-}
 
 /// Gdbstub target used by the gdbstub crate to provide GDB protocol implementation
-pub struct HyperlightKvmSandboxTarget {
-    /// Memory manager that grants access to guest's memory
-    mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
-    /// VcpuFd for access to vCPU state
-    vcpu_fd: Arc<RwLock<VcpuFd>>,
-    /// Guest entrypoint
-    entrypoint: u64,
-
-    /// KVM guest debug information
-    debug: KvmDebug,
-
-    /// vCPU paused state
-    paused: bool,
-    /// vCPU stepping state
-    single_step: bool,
-
-    /// Array of addresses for HW breakpoints
-    hw_breakpoints: Vec<u64>,
-    /// Array of addresses for SW breakpoints
-    sw_breakpoints: HashMap<u64, [u8; SW_BP_SIZE]>,
-
+pub struct HyperlightSandboxTarget {
     /// Hypervisor communication channels
     hyp_conn: GdbConnection,
 }
 
-impl HyperlightKvmSandboxTarget {
+impl HyperlightSandboxTarget {
     pub fn new(
-        mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
-        vcpu_fd: Arc<RwLock<VcpuFd>>,
-        entrypoint: u64,
         hyp_conn: GdbConnection,
     ) -> Self {
-        let kvm_debug = KvmDebug::new();
 
-        HyperlightKvmSandboxTarget {
-            mgr,
-            vcpu_fd,
-            debug: kvm_debug,
-            entrypoint,
-
-            paused: false,
-            single_step: false,
-
-            hw_breakpoints: vec![],
-            sw_breakpoints: HashMap::new(),
-
+        HyperlightSandboxTarget {
             hyp_conn,
         }
     }
 
-    /// Returns the instruction pointer from the stopped vCPU
-    fn get_instruction_pointer(&self) -> Result<u64, GdbTargetError> {
-        let regs = self
-            .vcpu_fd
-            .read()
-            .unwrap()
-            .get_regs()
-            .map_err(|_| GdbTargetError::InstructionPointerError)?;
+    fn send_command(&self, cmd: DebugAction) -> Result<DebugAction, GdbTargetError> {
+        self.send(cmd)?;
 
-        Ok(regs.rip)
-    }
-
-    fn set_single_step(&mut self, enable: bool) -> Result<(), GdbTargetError> {
-        self.single_step = enable;
-
-        self.debug
-            .set_breakpoints(&self.vcpu_fd.read().unwrap(), &self.hw_breakpoints, enable)?;
-
-        Ok(())
-    }
-
-    /// This method provides a way to set a breakpoint at the entrypoint
-    /// it does not keep this breakpoint set after the vcpu already stopped at the address
-    pub fn set_entrypoint_bp(&mut self) -> Result<bool, GdbTargetError> {
-        let mut entrypoint_debug = KvmDebug::new();
-        entrypoint_debug.set_breakpoints(&self.vcpu_fd.read().unwrap(), &[self.entrypoint], false)
-    }
-
-    /// Translates the guest address to physical address
-    fn translate_gva(&self, gva: u64) -> Result<u64, GdbTargetError> {
-        let tr = self
-            .vcpu_fd
-            .read()
-            .unwrap()
-            .translate_gva(gva)
-            .map_err(|_| GdbTargetError::InvalidGva(gva))?;
-
-        if tr.valid == 0 {
-            Err(GdbTargetError::InvalidGva(gva))
-        } else {
-            Ok(tr.physical_address)
-        }
-    }
-
-    fn read_regs(&self, regs: &mut X86_64CoreRegs) -> Result<(), GdbTargetError> {
-        log::debug!("Read registers");
-        let vcpu_regs = self
-            .vcpu_fd
-            .read()
-            .unwrap()
-            .get_regs()
-            .map_err(|_| GdbTargetError::ReadRegistersError)?;
-
-        regs.regs[0] = vcpu_regs.rax;
-        regs.regs[1] = vcpu_regs.rbx;
-        regs.regs[2] = vcpu_regs.rcx;
-        regs.regs[3] = vcpu_regs.rdx;
-        regs.regs[4] = vcpu_regs.rsi;
-        regs.regs[5] = vcpu_regs.rdi;
-        regs.regs[6] = vcpu_regs.rbp;
-        regs.regs[7] = vcpu_regs.rsp;
-        regs.regs[8] = vcpu_regs.r8;
-        regs.regs[9] = vcpu_regs.r9;
-        regs.regs[10] = vcpu_regs.r10;
-        regs.regs[11] = vcpu_regs.r11;
-        regs.regs[12] = vcpu_regs.r12;
-        regs.regs[13] = vcpu_regs.r13;
-        regs.regs[14] = vcpu_regs.r14;
-        regs.regs[15] = vcpu_regs.r15;
-
-        regs.rip = vcpu_regs.rip;
-
-        regs.eflags =
-            u32::try_from(vcpu_regs.rflags).map_err(|_| GdbTargetError::ReadRegistersError)?;
-
-        Ok(())
-    }
-
-    fn write_regs(&self, regs: &X86_64CoreRegs) -> Result<(), GdbTargetError> {
-        log::debug!("Write registers");
-        let new_regs = kvm_regs {
-            rax: regs.regs[0],
-            rbx: regs.regs[1],
-            rcx: regs.regs[2],
-            rdx: regs.regs[3],
-            rsi: regs.regs[4],
-            rdi: regs.regs[5],
-            rbp: regs.regs[6],
-            rsp: regs.regs[7],
-            r8: regs.regs[8],
-            r9: regs.regs[9],
-            r10: regs.regs[10],
-            r11: regs.regs[11],
-            r12: regs.regs[12],
-            r13: regs.regs[13],
-            r14: regs.regs[14],
-            r15: regs.regs[15],
-
-            rip: regs.rip,
-            rflags: regs.eflags as u64,
-        };
-
-        self.vcpu_fd
-            .read()
-            .unwrap()
-            .set_regs(&new_regs)
-            .map_err(|_| GdbTargetError::WriteRegistersError)
+        // Wait for response
+        Ok(self.hyp_conn.recv()?)
     }
 }
 
-impl GdbDebug for HyperlightKvmSandboxTarget {
-    fn send(&self, ev: DebugMessage) -> Result<(), Self::Error> {
+impl GdbDebug for HyperlightSandboxTarget {
+    fn send(&self, ev: DebugAction) -> Result<(), Self::Error> {
         self.hyp_conn.send(ev)
     }
 
-    fn recv(&self) -> Result<DebugMessage, Self::Error> {
+    fn recv(&self) -> Result<DebugAction, Self::Error> {
         self.hyp_conn.recv()
     }
 
-    fn try_recv(&self) -> Result<DebugMessage, TryRecvError> {
+    fn try_recv(&self) -> Result<DebugAction, TryRecvError> {
         self.hyp_conn.try_recv()
     }
 
-    fn pause_vcpu(&mut self) {
-        self.paused = true;
-    }
+    fn get_stop_reason(
+        &self,
+        reason: VcpuStopReason,
+    ) -> SingleThreadStopReason<<Self::Arch as Arch>::Usize> {
 
-    fn disable_debug(&mut self) -> Result<bool, Self::Error> {
-        self.debug = KvmDebug::default();
-
-        self.pause_vcpu();
-        self.hw_breakpoints = vec![];
-
-        let sw_bp_addr: Vec<u64> = self.sw_breakpoints.keys().into_iter().map(|a| *a).collect();
-
-        for addr in sw_bp_addr {
-            let _ = self.remove_sw_breakpoint(addr, BreakpointKind::from_usize(0).unwrap());
+        match reason {
+            VcpuStopReason::DoneStep => SingleThreadStopReason::DoneStep,
+            VcpuStopReason::SwBp => SingleThreadStopReason::SwBreak(()),
+            VcpuStopReason::HwBp => SingleThreadStopReason::HwBreak(()),
         }
-        self.sw_breakpoints = HashMap::new();
-
-        let _ = self.set_single_step(false);
-        self.debug.set_breakpoints(&self.vcpu_fd.read().unwrap(), &[], false)
     }
 
     /// Sends an event to the Hypervisor that tells it to resume vCPU execution
     /// Note: The method waits for a confirmation message
     fn resume_vcpu(&mut self) -> Result<(), Self::Error> {
-        if self.paused {
-            log::info!("Attempted to resume paused vCPU");
-
-            self.send(DebugMessage::VcpuResumeEv)?;
-
-            let response = self.recv()?;
-            log::debug!("Got message {:?}", response);
-
-            if let DebugMessage::RspOk = response {
-                self.paused = false;
-            } else {
-                log::error!("Error when resuming");
-                return Err(GdbTargetError::CannotResume);
-            }
+        log::info!("Attempted to resume vCPU");
+        if let DebugAction::ContinueRsp = self.send_command(DebugAction::ContinueReq)? {
+            Ok(())
+        } else {
+            log::error!("Didn't receive ContinueRsp");
+            Err(GdbTargetError::UnexpectedMessageError)
         }
-
-        Ok(())
-    }
-
-    /// Get the reason the vCPU has stopped
-    fn get_stop_reason(
-        &self,
-    ) -> Result<Option<BaseStopReason<(), <Self::Arch as Arch>::Usize>>, Self::Error> {
-        if self.single_step {
-            return Ok(Some(SingleThreadStopReason::DoneStep));
-        }
-
-        let ip = self.get_instruction_pointer()?;
-        let gpa = self.translate_gva(ip)?;
-        if self.sw_breakpoints.contains_key(&gpa) {
-            return Ok(Some(SingleThreadStopReason::SwBreak(())));
-        }
-
-        if self.hw_breakpoints.contains(&ip) {
-            return Ok(Some(SingleThreadStopReason::HwBreak(())));
-        }
-
-        if ip == self.entrypoint {
-            return Ok(Some(SingleThreadStopReason::HwBreak(())));
-        }
-
-        Ok(None)
     }
 }
 
-impl Target for HyperlightKvmSandboxTarget {
+impl Target for HyperlightSandboxTarget {
     type Arch = GdbTargetArch;
     type Error = GdbTargetError;
 
@@ -364,81 +106,100 @@ impl Target for HyperlightKvmSandboxTarget {
     }
 }
 
-impl SingleThreadBase for HyperlightKvmSandboxTarget {
+impl SingleThreadBase for HyperlightSandboxTarget {
     fn read_addrs(
         &mut self,
-        mut gva: <Self::Arch as Arch>::Usize,
-        mut data: &mut [u8],
+        gva: <Self::Arch as Arch>::Usize,
+        data: &mut [u8],
     ) -> TargetResult<usize, Self> {
-        let data_len = data.len();
-        log::debug!("Read addr: {:X} len: {:X}", gva, data_len);
+        log::debug!("Read addr: {:X} len: {:X}", gva, data.len());
 
-        let mut mgr = self.mgr.lock().unwrap();
-        while !data.is_empty() {
-            let gpa = self.translate_gva(gva)?;
+        if let DebugAction::ReadAddrRsp(v) = self.send_command(DebugAction::ReadAddrReq(gva, data.len()))? {
+            data.copy_from_slice(&v);
 
-            let read_len = std::cmp::min(
-                data.len(),
-                (PAGE_SIZE - (gpa & (PAGE_SIZE - 1))).try_into().unwrap(),
-            );
-            let offset = gpa as usize - SandboxMemoryLayout::BASE_ADDRESS;
-
-            let _ = mgr.shared_mem.with_exclusivity(|ex| {
-                data[..read_len].copy_from_slice(&ex.as_slice()[offset..offset + read_len]);
-            });
-
-            data = &mut data[read_len..];
-            gva += read_len as u64;
+            Ok(v.len())
+        } else {
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
         }
-
-        Ok(data_len)
     }
 
     fn write_addrs(
         &mut self,
-        mut gva: <Self::Arch as Arch>::Usize,
-        mut data: &[u8],
+        gva: <Self::Arch as Arch>::Usize,
+        data: &[u8],
     ) -> TargetResult<(), Self> {
-        let data_len = data.len();
-        log::debug!("Write addr: {:X} len: {:X}", gva, data_len);
+        log::debug!("Write addr: {:X} len: {:X}", gva, data.len());
+        let v = Vec::from(data);
 
-        let mut mgr = self.mgr.lock().unwrap();
-        while !data.is_empty() {
-            let gpa = self.translate_gva(gva)?;
-
-            let write_len = std::cmp::min(
-                data.len(),
-                (PAGE_SIZE - (gpa & (PAGE_SIZE - 1))).try_into().unwrap(),
-            );
-            let offset = gpa as usize - SandboxMemoryLayout::BASE_ADDRESS;
-
-            let _ = mgr
-                .shared_mem
-                .with_exclusivity(|ex| ex.copy_from_slice(data, offset));
-
-            data = &data[write_len..];
-            gva += write_len as u64;
+        if let DebugAction::WriteAddrRsp = self.send_command(DebugAction::WriteAddrReq(gva, v))? {
+            Ok(())
+        } else {
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
         }
-
-        Ok(())
     }
 
     fn read_registers(
         &mut self,
         regs: &mut <Self::Arch as Arch>::Registers,
     ) -> TargetResult<(), Self> {
-        self.read_regs(regs)?;
+        if let DebugAction::ReadRegistersRsp(read_regs) = self.send_command(DebugAction::ReadRegistersReq)? {
+            log::debug!("Got regs: {:?}", read_regs);
+            regs.regs[0] = read_regs.rax;
+            regs.regs[1] = read_regs.rbp;
+            regs.regs[2] = read_regs.rcx;
+            regs.regs[3] = read_regs.rdx;
+            regs.regs[4] = read_regs.rsi;
+            regs.regs[5] = read_regs.rdi;
+            regs.regs[6] = read_regs.rbp;
+            regs.regs[7] = read_regs.rsp;
+            regs.regs[8] = read_regs.r8;
+            regs.regs[9] = read_regs.r9;
+            regs.regs[10] = read_regs.r10;
+            regs.regs[11] = read_regs.r11;
+            regs.regs[12] = read_regs.r12;
+            regs.regs[13] = read_regs.r13;
+            regs.regs[14] = read_regs.r14;
+            regs.regs[15] = read_regs.r15;
+            regs.rip = read_regs.rip;
+            regs.eflags = u32::try_from(read_regs.rflags).expect("Couldn't convert rflags from u64 to u32");
+            log::debug!("filled regs: {:?}", regs);
 
-        Ok(())
+            Ok(())
+        } else {
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        }
     }
 
     fn write_registers(
         &mut self,
         regs: &<Self::Arch as Arch>::Registers,
     ) -> TargetResult<(), Self> {
-        self.write_regs(regs)?;
+        let regs = X86_64Regs {
+            rax: regs.regs[0],
+            rbx: regs.regs[1],
+            rcx: regs.regs[2],
+            rdx: regs.regs[3],
+            rsi: regs.regs[4],
+            rdi: regs.regs[5],
+            rbp: regs.regs[6],
+            rsp: regs.regs[7],
+            r8: regs.regs[8],
+            r9: regs.regs[9],
+            r10: regs.regs[10],
+            r11: regs.regs[11],
+            r12: regs.regs[12],
+            r13: regs.regs[13],
+            r14: regs.regs[14],
+            r15: regs.regs[15],
+            rip: regs.rip,
+            rflags: u64::try_from(regs.eflags).expect("Couldn't convert eflags from u32 to u64"),
+        };
 
-        Ok(())
+        if let DebugAction::WriteRegistersRsp = self.send_command(DebugAction::WriteRegistersReq(regs))? {
+            Ok(())
+        } else {
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        }
     }
 
     fn support_resume(&mut self) -> Option<SingleThreadResumeOps<Self>> {
@@ -446,20 +207,24 @@ impl SingleThreadBase for HyperlightKvmSandboxTarget {
     }
 }
 
-impl SectionOffsets for HyperlightKvmSandboxTarget {
+impl SectionOffsets for HyperlightSandboxTarget {
     fn get_section_offsets(&mut self) -> Result<Offsets<<Self::Arch as Arch>::Usize>, Self::Error> {
-        let mgr = self.mgr.lock().unwrap();
-        let text = mgr.layout.get_guest_code_address();
+        log::debug!("Get section offsets");
 
-        log::debug!("Get section offsets text: {:X}", text);
-        Ok(Offsets::Segments {
-            text_seg: text as u64,
-            data_seg: None,
-        })
+        if let DebugAction::GetCodeSectionOffsetRsp(text) = self.send_command(DebugAction::GetCodeSectionOffsetReq)? {
+            log::debug!("Get section offsets got {:X}", text);
+            Ok(Offsets::Segments {
+                text_seg: text as u64,
+                data_seg: None,
+            })
+        } else {
+            Err(GdbTargetError::UnexpectedMessageError)
+        }
+
     }
 }
 
-impl Breakpoints for HyperlightKvmSandboxTarget {
+impl Breakpoints for HyperlightSandboxTarget {
     fn support_hw_breakpoint(&mut self) -> Option<HwBreakpointOps<Self>> {
         Some(self)
     }
@@ -468,7 +233,7 @@ impl Breakpoints for HyperlightKvmSandboxTarget {
     }
 }
 
-impl HwBreakpoint for HyperlightKvmSandboxTarget {
+impl HwBreakpoint for HyperlightSandboxTarget {
     /// Adds a hardware breakpoint to an array that can store a maximum of
     /// `KvmDebug::MAX_NO_OF_HW_BP` breakpoints and updates vCPU debug config
     /// to reflect the newly added breakpoint
@@ -483,18 +248,10 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Add hw breakpoint at address {:X}", addr);
 
-        let addr = self.translate_gva(addr)?;
-
-        if self.hw_breakpoints.contains(&addr) {
-            Ok(true)
-        } else if self.hw_breakpoints.len() >= KvmDebug::MAX_NO_OF_HW_BP {
-            Ok(false)
+        if let DebugAction::AddHwBreakpointRsp(rsp) = self.send_command(DebugAction::AddHwBreakpointReq(addr))? {
+            Ok(rsp)
         } else {
-            self.hw_breakpoints.push(addr);
-            self.debug
-                .set_breakpoints(&self.vcpu_fd.read().unwrap(), &self.hw_breakpoints, false)?;
-
-            Ok(true)
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
         }
     }
 
@@ -507,23 +264,15 @@ impl HwBreakpoint for HyperlightKvmSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Remove hw breakpoint at address {:X}", addr);
 
-        let addr = self.translate_gva(addr)?;
-
-        if self.hw_breakpoints.contains(&addr) {
-            let index = self.hw_breakpoints.iter().position(|a| *a == addr).unwrap();
-            self.hw_breakpoints.copy_within(index + 1.., index);
-            self.hw_breakpoints.pop();
-            self.debug
-                .set_breakpoints(&self.vcpu_fd.read().unwrap(), &self.hw_breakpoints, false)?;
-
-            Ok(true)
+        if let DebugAction::RemoveHwBreakpointRsp(rsp) = self.send_command(DebugAction::RemoveHwBreakpointReq(addr))? {
+            Ok(rsp)
         } else {
-            Ok(false)
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
         }
     }
 }
 
-impl SwBreakpoint for HyperlightKvmSandboxTarget {
+impl SwBreakpoint for HyperlightSandboxTarget {
     /// Adds a software breakpoint by setting a specific operation code at the
     /// address so when the vCPU hits it, it knows it is a software breakpoint.
     ///
@@ -535,19 +284,12 @@ impl SwBreakpoint for HyperlightKvmSandboxTarget {
         _kind: <Self::Arch as Arch>::BreakpointKind,
     ) -> TargetResult<bool, Self> {
         log::debug!("Add sw breakpoint at address {:X}", addr);
-        let addr = self.translate_gva(addr)?;
 
-        if self.sw_breakpoints.contains_key(&addr) {
-            return Ok(true);
+        if let DebugAction::AddSwBreakpointRsp(rsp) = self.send_command(DebugAction::AddSwBreakpointReq(addr))? {
+            Ok(rsp)
+        } else {
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
         }
-
-        let mut save_data = [0u8; SW_BP_SIZE];
-        self.read_addrs(addr, &mut save_data)?;
-        self.write_addrs(addr, &SW_BP)?;
-
-        self.sw_breakpoints.insert(addr, save_data);
-
-        Ok(true)
     }
 
     /// Removes a software breakpoint by restoring the saved data at the corresponding
@@ -559,26 +301,17 @@ impl SwBreakpoint for HyperlightKvmSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Remove sw breakpoint at address {:X}", addr);
 
-        let addr = self.translate_gva(addr)?;
-
-        if self.sw_breakpoints.contains_key(&addr) {
-            let save_data = self
-                .sw_breakpoints
-                .remove(&addr)
-                .expect("Expected the hashmap to contain the address");
-            self.write_addrs(addr, &save_data)?;
-
-            Ok(true)
+        if let DebugAction::RemoveSwBreakpointRsp(rsp) = self.send_command(DebugAction::RemoveSwBreakpointReq(addr))? {
+            Ok(rsp)
         } else {
-            Ok(false)
+            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
         }
     }
 }
 
-impl SingleThreadResume for HyperlightKvmSandboxTarget {
+impl SingleThreadResume for HyperlightSandboxTarget {
     fn resume(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
         log::debug!("Resume");
-        self.set_single_step(false)?;
         self.resume_vcpu()
     }
     fn support_single_step(&mut self) -> Option<SingleThreadSingleStepOps<Self>> {
@@ -586,12 +319,17 @@ impl SingleThreadResume for HyperlightKvmSandboxTarget {
     }
 }
 
-impl SingleThreadSingleStep for HyperlightKvmSandboxTarget {
+impl SingleThreadSingleStep for HyperlightSandboxTarget {
     fn step(&mut self, signal: Option<Signal>) -> Result<(), Self::Error> {
         assert!(signal.is_none());
 
         log::debug!("Step");
-        self.set_single_step(true)?;
-        self.resume_vcpu()
+        if let DebugAction::StepRsp = self.send_command(DebugAction::StepReq)? {
+            log::debug!("Got StepRsp");
+
+            Ok(())
+        } else {
+            Err(GdbTargetError::UnexpectedMessageError)
+        }
     }
 }

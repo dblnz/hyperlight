@@ -24,6 +24,8 @@ use hyperlight_host::sandbox_state::transition::Noop;
 use hyperlight_host::{MultiUseSandbox, UninitializedSandbox};
 
 fn main() -> hyperlight_host::Result<()> {
+    env_logger::init();
+
     // Create an uninitialized sandbox with a guest binary
     let mut uninitialized_sandbox = UninitializedSandbox::new(
         hyperlight_host::GuestBinary::FilePath(

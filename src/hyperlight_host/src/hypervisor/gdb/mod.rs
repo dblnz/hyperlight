@@ -9,7 +9,7 @@ use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use event_loop::event_loop_thread;
 use gdbstub::arch::Arch;
 use gdbstub::conn::ConnectionExt;
-use gdbstub::stub::{BaseStopReason, GdbStub};
+use gdbstub::stub::{GdbStub, SingleThreadStopReason};
 use gdbstub::target::{Target, TargetError};
 use thiserror::Error;
 
@@ -56,8 +56,8 @@ impl From<io::Error> for GdbTargetError {
     }
 }
 
-impl From<DebugMessage> for GdbTargetError {
-    fn from(_value: DebugMessage) -> Self {
+impl From<DebugMsg> for GdbTargetError {
+    fn from(_value: DebugMsg) -> Self {
         GdbTargetError::UnexpectedMessageError
     }
 }
@@ -77,28 +77,83 @@ impl From<GdbTargetError> for TargetError<GdbTargetError> {
 /// Trait that provides common communication methods for targets
 pub trait GdbDebug: Target {
     /// Sends a message to the Hypervisor
-    fn send(&self, ev: DebugMessage) -> Result<(), <Self as Target>::Error>;
+    fn send(&self, ev: DebugAction) -> Result<(), <Self as Target>::Error>;
     /// Waits for a message from the Hypervisor
-    fn recv(&self) -> Result<DebugMessage, <Self as Target>::Error>;
+    fn recv(&self) -> Result<DebugAction, <Self as Target>::Error>;
     /// Checks for a pending message from the Hypervisor
-    fn try_recv(&self) -> Result<DebugMessage, TryRecvError>;
+    fn try_recv(&self) -> Result<DebugAction, TryRecvError>;
 
-    /// Disables debug
-    fn disable_debug(&mut self) -> Result<bool, <Self as Target>::Error>;
-    /// Marks the vCPU as paused
-    fn pause_vcpu(&mut self);
     /// Resumes the vCPU
     fn resume_vcpu(&mut self) -> Result<(), <Self as Target>::Error>;
     /// Returns the reason why vCPU stopped
-    #[allow(clippy::type_complexity)]
     fn get_stop_reason(
         &self,
-    ) -> Result<Option<BaseStopReason<(), <Self::Arch as Arch>::Usize>>, Self::Error>;
+        reason: VcpuStopReason,
+    ) -> SingleThreadStopReason<<Self::Arch as Arch>::Usize>;
 }
 
-/// Event sent to the VCPU execution loop
+#[derive(Debug, Default)]
+pub struct X86_64Regs {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub rsp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rflags: u64,
+}
+
 #[derive(Debug)]
-pub enum DebugMessage {
+pub enum VcpuStopReason {
+    DoneStep,
+    HwBp,
+    SwBp,
+}
+
+/// `DebugAction` enumerates the possible actions that a debugger can
+/// ask from a Hypervisor
+#[derive(Debug)]
+pub enum DebugAction {
+    ReadRegistersReq,
+    ReadRegistersRsp(X86_64Regs),
+    WriteRegistersReq(X86_64Regs),
+    WriteRegistersRsp,
+    ReadAddrReq(u64, usize),
+    ReadAddrRsp(Vec<u8>),
+    WriteAddrReq(u64, Vec<u8>),
+    WriteAddrRsp,
+    AddHwBreakpointReq(u64),
+    AddHwBreakpointRsp(bool),
+    RemoveHwBreakpointReq(u64),
+    RemoveHwBreakpointRsp(bool),
+    AddSwBreakpointReq(u64),
+    AddSwBreakpointRsp(bool),
+    RemoveSwBreakpointReq(u64),
+    RemoveSwBreakpointRsp(bool),
+    ContinueReq,
+    ContinueRsp,
+    StepReq,
+    StepRsp,
+    VcpuStopped(Option<VcpuStopReason>),
+    GetCodeSectionOffsetReq,
+    GetCodeSectionOffsetRsp(u64),
+}
+
+/// `DebugMsg` is a structure used by the Hypervisor to indicate that
+/// the vCPU changed state
+#[derive(Debug)]
+pub enum DebugMsg {
     /// VCPU stopped in debug
     VcpuStoppedEv,
     /// Resume VCPU execution
@@ -112,9 +167,9 @@ pub enum DebugMessage {
 /// Type that takes care of communication between Hypervisor and Gdb
 pub struct GdbConnection {
     /// Transmit channel
-    tx: Sender<DebugMessage>,
+    tx: Sender<DebugAction>,
     /// Receive channel
-    rx: Receiver<DebugMessage>,
+    rx: Receiver<DebugAction>,
 }
 
 impl GdbConnection {
@@ -135,18 +190,18 @@ impl GdbConnection {
         (gdb_conn, hyp_conn)
     }
 
-    /// Sends message over the transmit channel
-    pub fn send(&self, msg: DebugMessage) -> Result<(), GdbTargetError> {
+    /// Sends message over the transmit channel and expects a response
+    pub fn send(&self, msg: DebugAction) -> Result<(), GdbTargetError> {
         self.tx.send(msg).map_err(|_| GdbTargetError::SendMsgError)
     }
 
     /// Waits for a message over the receive channel
-    pub fn recv(&self) -> Result<DebugMessage, GdbTargetError> {
+    pub fn recv(&self) -> Result<DebugAction, GdbTargetError> {
         self.rx.recv().map_err(|_| GdbTargetError::ReceiveMsgError)
     }
 
     /// Checks whether there's a message waiting on the receive channel
-    pub fn try_recv(&self) -> Result<DebugMessage, TryRecvError> {
+    pub fn try_recv(&self) -> Result<DebugAction, TryRecvError> {
         self.rx.try_recv()
     }
 }
@@ -157,7 +212,7 @@ pub fn create_gdb_thread<T: GdbDebug + Send + 'static>(
 ) -> Result<(), <T as Target>::Error>
 where
     <T as Target>::Error:
-        std::fmt::Debug + Send + From<io::Error> + From<DebugMessage>,
+        std::fmt::Debug + Send + From<io::Error> + From<DebugMsg>,
 {
     let socket = format!("localhost:{}", 8081);
 
@@ -177,14 +232,8 @@ where
 
                 // Waits for vCPU to stop at entrypoint breakpoint
                 let res = target.recv()?;
-                if let DebugMessage::VcpuStoppedEv = res {
-                    target.pause_vcpu();
-
+                if let DebugAction::VcpuStopped(_) = res {
                     event_loop_thread(debugger, &mut target);
-                }
-
-                if target.disable_debug()? {
-                    target.resume_vcpu()?;
                 }
 
                 Ok(())

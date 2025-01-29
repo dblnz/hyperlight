@@ -9,6 +9,8 @@ use gdbstub::target::Target;
 
 use crate::hypervisor::gdb::GdbDebug;
 
+use super::{DebugAction, VcpuStopReason};
+
 pub struct GdbBlockingEventLoop<T> {
     _phantom: PhantomData<T>,
 }
@@ -30,24 +32,27 @@ impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T> {
     > {
         loop {
             match target.try_recv() {
-                Ok(_) => {
-                    target.pause_vcpu();
-
-                    // Get the stop reason from the target
-                    let stop_reason = target
-                        .get_stop_reason()
-                        .map_err(WaitForStopReasonError::Target)?;
+                Ok(DebugAction::VcpuStopped(stop_reason)) => {
+                    log::debug!("VcpuStopped with reason {:?}", stop_reason);
 
                     // Resume execution if unknown reason for stop
-                    let Some(stop_response) = stop_reason else {
-                        target
-                            .resume_vcpu()
-                            .map_err(WaitForStopReasonError::Target)?;
+                    let stop_response = match stop_reason {
+                        Some(reason) => target.get_stop_reason(reason),
+                        None => {
+                            target
+                                .resume_vcpu()
+                                .map_err(WaitForStopReasonError::Target)?;
 
-                        continue;
+                            continue;
+                        }
                     };
+                    log::debug!("Translated stop response {:?}", stop_response);
 
                     return Ok(run_blocking::Event::TargetStopped(stop_response));
+                }
+                Ok(m) => {
+                    log::error!("Invalid message got here {:?}", m);
+
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => (),
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -66,10 +71,8 @@ impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T> {
     }
 
     fn on_interrupt(
-        target: &mut Self::Target,
+        _target: &mut Self::Target,
     ) -> Result<Option<Self::StopReason>, <Self::Target as gdbstub::target::Target>::Error> {
-        target.pause_vcpu();
-
         Ok(Some(SingleThreadStopReason::SignalWithThread {
             tid: (),
             signal: Signal::SIGINT,
