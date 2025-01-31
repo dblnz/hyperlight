@@ -37,14 +37,10 @@ impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T> {
 
                     // Resume execution if unknown reason for stop
                     let stop_response = match stop_reason {
-                        Some(reason) => {
-                            match reason {
-                                VcpuStopReason::DoneStep => BaseStopReason::DoneStep,
-                                VcpuStopReason::SwBp => BaseStopReason::SwBreak(()),
-                                VcpuStopReason::HwBp => BaseStopReason::HwBreak(()),
-                            }
-                        }
-                        None => {
+                        VcpuStopReason::DoneStep => BaseStopReason::DoneStep,
+                        VcpuStopReason::SwBp => BaseStopReason::SwBreak(()),
+                        VcpuStopReason::HwBp => BaseStopReason::HwBreak(()),
+                        VcpuStopReason::Unknown => {
                             target
                                 .resume_vcpu()
                                 .map_err(WaitForStopReasonError::Target)?;

@@ -113,6 +113,7 @@ pub enum VcpuStopReason {
     DoneStep,
     HwBp,
     SwBp,
+    Unknown,
 }
 
 /// `DebugAction` enumerates the possible actions that a debugger can
@@ -139,7 +140,7 @@ pub enum DebugAction {
     ContinueRsp,
     StepReq,
     StepRsp,
-    VcpuStopped(Option<VcpuStopReason>),
+    VcpuStopped(VcpuStopReason),
     GetCodeSectionOffsetReq,
     GetCodeSectionOffsetRsp(u64),
 }

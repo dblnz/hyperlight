@@ -305,6 +305,8 @@ impl Hypervisor for HypervWindowsDriver {
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        #[cfg(gdb)]
+        dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let regs = WHvGeneralRegisters {
             rip: self.entrypoint,
@@ -326,6 +328,8 @@ impl Hypervisor for HypervWindowsDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
+            #[cfg(gdb)]
+            dbg_mem_access_hdl,
         )?;
 
         // reset RSP to what it was before initialise
@@ -344,6 +348,8 @@ impl Hypervisor for HypervWindowsDriver {
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        #[cfg(gdb)]
+        dbg_mem_access_hdl: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         // Reset general purpose registers except RSP, then set RIP
         let rsp_before = self.processor.get_regs()?.rsp;
@@ -368,6 +374,7 @@ impl Hypervisor for HypervWindowsDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
+            dbg_mem_access_hdl,
         )?;
 
         // reset RSP to what it was before function call

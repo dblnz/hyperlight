@@ -66,9 +66,9 @@ pub(crate) fn is_hypervisor_present() -> bool {
 
 #[cfg(gdb)]
 mod debug {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::{Arc, Mutex}};
 
-    use crate::{hypervisor::gdb::{DebugAction, VcpuStopReason}, mem::{layout::SandboxMemoryLayout, mgr::SandboxMemoryManager, shared_mem::{GuestSharedMemory, SharedMemory}}};
+    use crate::{hypervisor::{gdb::{DebugAction, VcpuStopReason}, handlers::DbgMemAccessHandlerCaller}, mem::{layout::SandboxMemoryLayout, mgr::SandboxMemoryManager, shared_mem::{GuestSharedMemory, SharedMemory}}, new_error, HyperlightError};
 
     use super::KVMDriver;
     use hyperlight_common::mem::PAGE_SIZE;
@@ -80,11 +80,11 @@ mod debug {
     use kvm_ioctls::VcpuFd;
 
     /// Software Breakpoint size in memory
-    const SW_BP_SIZE: usize = 1;
+    pub const SW_BP_SIZE: usize = 1;
     /// Software Breakpoinnt opcode
     const SW_BP_OP: u8 = 0xCC;
     /// Software Breakpoint written to memory
-    const SW_BP: [u8; SW_BP_SIZE] = [SW_BP_OP];
+    pub const SW_BP: [u8; SW_BP_SIZE] = [SW_BP_OP];
 
     /// KVM Debug struct
     /// This struct is used to abstract the internal details of the kvm
@@ -163,7 +163,7 @@ mod debug {
 
     impl KVMDriver {
         /// Returns the instruction pointer from the stopped vCPU
-        fn get_instruction_pointer(&self) -> Result<u64, GdbTargetError> {
+        pub fn get_instruction_pointer(&self) -> Result<u64, GdbTargetError> {
             let regs = self
                 .vcpu_fd
                 .get_regs()
@@ -172,7 +172,7 @@ mod debug {
             Ok(regs.rip)
         }
 
-        fn set_single_step(&mut self, enable: bool) -> Result<(), GdbTargetError> {
+        pub fn set_single_step(&mut self, enable: bool) -> Result<(), GdbTargetError> {
             self.debug
                 .set_breakpoints(&self.vcpu_fd, enable)?;
 
@@ -202,16 +202,19 @@ mod debug {
             }
         }
 
-        fn read_addrs(&mut self, mut gva: u64, len: usize) -> Result<Vec<u8>, GdbTargetError> {
-            let mut v = vec![0u8; len];
-            let mut data = &mut v[..];
+        pub fn read_addrs(
+            &mut self,
+            mut gva: u64,
+            mut data: &mut [u8],
+            dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
+            ) -> Result<(), HyperlightError> {
+
             let data_len = data.len();
-
             log::debug!("Read addr: {:X} len: {:X}", gva, data_len);
+        
 
-            let mut mgr = self.mgr.lock().unwrap();
             while !data.is_empty() {
-                let gpa = self.translate_gva(gva)?;
+                let gpa = self.translate_gva(gva).map_err(|_| new_error!("Couldn't translate gva"))?;
 
                 let read_len = std::cmp::min(
                     data.len(),
@@ -219,24 +222,33 @@ mod debug {
                 );
                 let offset = gpa as usize - SandboxMemoryLayout::BASE_ADDRESS;
 
-                let _ = mgr.shared_mem.with_exclusivity(|ex| {
-                    data[..read_len].copy_from_slice(&ex.as_slice()[offset..offset + read_len]);
-                });
+                dbg_mem_access_fn
+                    .clone()
+                    .try_lock()
+                    .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+                    .read(offset as usize, &mut data[..read_len])?;
 
                 data = &mut data[read_len..];
                 gva += read_len as u64;
             }
+        
+            log::debug!("data before after {:?}", data);
 
-            Ok(v)
+            Ok(())
         }
+        
+        pub fn write_addrs(
+            &mut self,
+            mut gva: u64,
+            mut data: &[u8],
+            dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
 
-        fn write_addrs(&mut self, mut gva: u64, mut data: &[u8]) -> Result<(), GdbTargetError> {
+            ) -> Result<(), HyperlightError> {
             let data_len = data.len();
             log::debug!("Write addr: {:X} len: {:X}", gva, data_len);
-
-            let mut mgr = self.mgr.lock().unwrap();
+        
             while !data.is_empty() {
-                let gpa = self.translate_gva(gva)?;
+                let gpa = self.translate_gva(gva).map_err(|_| new_error!("Couldn't translate gva"))?;
 
                 let write_len = std::cmp::min(
                     data.len(),
@@ -244,18 +256,21 @@ mod debug {
                 );
                 let offset = gpa as usize - SandboxMemoryLayout::BASE_ADDRESS;
 
-                let _ = mgr
-                    .shared_mem
-                    .with_exclusivity(|ex| ex.copy_from_slice(data, offset));
+                dbg_mem_access_fn
+                    .clone()
+                    .try_lock()
+                    .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+                    .write(offset as usize, data)?;
 
                 data = &data[write_len..];
                 gva += write_len as u64;
             }
+        
 
             Ok(())
         }
 
-        fn read_regs(&self, regs: &mut X86_64Regs) -> Result<(), GdbTargetError> {
+        pub fn read_regs(&self, regs: &mut X86_64Regs) -> Result<(), GdbTargetError> {
             log::debug!("Read registers");
             let vcpu_regs = self
                 .vcpu_fd
@@ -287,7 +302,7 @@ mod debug {
             Ok(())
         }
 
-        fn write_regs(&self, regs: &X86_64Regs) -> Result<(), GdbTargetError> {
+        pub fn write_regs(&self, regs: &X86_64Regs) -> Result<(), GdbTargetError> {
             log::debug!("Write registers");
             let new_regs = kvm_regs {
                 rax: regs.rax,
@@ -316,7 +331,7 @@ mod debug {
                 .map_err(|_| GdbTargetError::WriteRegistersError)
         }
 
-        fn add_hw_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
+        pub fn add_hw_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
             let addr = self.translate_gva(addr)?;
 
             if self.debug.hw_breakpoints.contains(&addr) {
@@ -332,7 +347,7 @@ mod debug {
             }
         }
 
-        fn remove_hw_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
+        pub fn remove_hw_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
             let addr = self.translate_gva(addr)?;
 
             if self.debug.hw_breakpoints.contains(&addr) {
@@ -348,31 +363,40 @@ mod debug {
             }
         }
 
-        fn add_sw_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
-            let addr = self.translate_gva(addr)?;
+        pub fn add_sw_breakpoint(
+            &mut self,
+            addr: u64,
+            dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
+            ) -> Result<bool, HyperlightError> {
+            let addr = self.translate_gva(addr).map_err(|_| new_error!("Translate error"))?;
 
             if self.debug.sw_breakpoints.contains_key(&addr) {
                 return Ok(true);
             }
 
-            let save_data = self.read_addrs(addr, SW_BP_SIZE)?;
-            let save_data = [save_data[0]; SW_BP_SIZE];
-            self.write_addrs(addr, &SW_BP)?;
+            let mut save_data = [0; SW_BP_SIZE];
+            self.read_addrs(addr, &mut save_data[..], dbg_mem_access_fn.clone())?;
+            self.write_addrs(addr, &SW_BP, dbg_mem_access_fn.clone())?;
 
             self.debug.sw_breakpoints.insert(addr, save_data);
 
             Ok(true)
         }
 
-        fn remove_sw_breakpoint(&mut self, addr: u64) -> Result<bool, GdbTargetError> {
-            let addr = self.translate_gva(addr)?;
+        pub fn remove_sw_breakpoint(
+            &mut self,
+            addr: u64,
+            dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
+            ) -> Result<bool, HyperlightError> {
+            let addr = self.translate_gva(addr).map_err(|_| new_error!("Translate error"))?;
 
             if self.debug.sw_breakpoints.contains_key(&addr) {
                 let save_data = self
                     .debug.sw_breakpoints
                     .remove(&addr)
                     .expect("Expected the hashmap to contain the address");
-                self.write_addrs(addr, &save_data)?;
+
+                self.write_addrs(addr, &save_data, dbg_mem_access_fn.clone())?;
 
                 Ok(true)
             } else {
@@ -380,112 +404,29 @@ mod debug {
             }
         }
 
-
-        fn get_section_offsets(&mut self) -> Result<u64, GdbTargetError> {
-            let mgr = self.mgr.lock().unwrap();
-            let text = mgr.layout.get_guest_code_address();
-
-            log::debug!("Get section offsets text: {:X}", text);
-            Ok(text as u64)
-        }
-
         /// Get the reason the vCPU has stopped
         pub fn get_stop_reason(
             &self,
-        ) -> Result<Option<VcpuStopReason>, GdbTargetError> {
+        ) -> Result<VcpuStopReason, GdbTargetError> {
             if self.debug.single_step {
-                return Ok(Some(VcpuStopReason::DoneStep));
+                return Ok(VcpuStopReason::DoneStep);
             }
 
             let ip = self.get_instruction_pointer()?;
             let gpa = self.translate_gva(ip)?;
             if self.debug.sw_breakpoints.contains_key(&gpa) {
-                return Ok(Some(VcpuStopReason::SwBp));
+                return Ok(VcpuStopReason::SwBp);
             }
 
             if self.debug.hw_breakpoints.contains(&ip) {
-                return Ok(Some(VcpuStopReason::HwBp));
+                return Ok(VcpuStopReason::HwBp);
             }
 
             if ip == self.entrypoint {
-                return Ok(Some(VcpuStopReason::HwBp));
+                return Ok(VcpuStopReason::HwBp);
             }
 
-            Ok(None)
-        }
-
-        pub fn wait_cmd(&self) -> Result<DebugAction, GdbTargetError> {
-            self.gdb_conn.recv()
-        }
-
-        pub fn send_cmd(&self, cmd: DebugAction) -> Result<(), GdbTargetError> {
-            log::debug!("Sending {:?}", cmd);
-
-            self.gdb_conn.send(cmd)
-        }
-
-        pub fn process_request(&mut self, req: DebugAction) -> bool {
-            log::debug!("{:?}", req);
-            let mut cont = false;
-
-            match req {
-                DebugAction::ContinueReq => {
-                    self.set_single_step(false);
-                    self.send_cmd(DebugAction::ContinueRsp).expect("Sending continue rsp error");
-                    cont = true;
-                }
-                DebugAction::StepReq => {
-                    self.set_single_step(true);
-                    self.send_cmd(DebugAction::StepRsp).expect("Sending step rsp error");
-                    cont = true;
-                }
-
-                DebugAction::ReadRegistersReq => {
-                    let mut regs = X86_64Regs::default();
-                    self.read_regs(&mut regs).expect("Read Regs error");
-                    self.send_cmd(DebugAction::ReadRegistersRsp(regs)).expect("Sending read regs rsp error");
-                }
-                DebugAction::WriteRegistersReq(regs) => {
-                    self.write_regs(&regs).expect("Write Regs error");
-                    self.send_cmd(DebugAction::WriteRegistersRsp).expect("Sending write regs rsp error");
-
-                }
-                DebugAction::ReadAddrReq(gva, len) => {
-                    let v = self.read_addrs(gva, len).expect("Read addrs error");
-                    self.send_cmd(DebugAction::ReadAddrRsp(v)).expect("Sending read addrs rsp error");
-                }
-                DebugAction::WriteAddrReq(gva, v) => {
-                    self.write_addrs(gva, &v).expect("Read addrs error");
-                    self.send_cmd(DebugAction::WriteAddrRsp).expect("Sending read addrs rsp error");
-                }
-
-                DebugAction::AddHwBreakpointReq(addr) => {
-                    let res = self.add_hw_breakpoint(addr).expect("Add hw breakpoint error");
-                    self.send_cmd(DebugAction::AddHwBreakpointRsp(res)).expect("Sending Add hw breakpoint rsp error");
-                }
-                DebugAction::RemoveHwBreakpointReq(addr) => {
-                    let res = self.remove_hw_breakpoint(addr).expect("Remove hw breakpoint error");
-                    self.send_cmd(DebugAction::RemoveHwBreakpointRsp(res)).expect("Sending remove hw breakpoint rsp error");
-                }
-
-                DebugAction::AddSwBreakpointReq(addr) => {
-                    let res = self.add_sw_breakpoint(addr).expect("Add sw breakpoint error");
-                    self.send_cmd(DebugAction::AddSwBreakpointRsp(res)).expect("Sending Add sw breakpoint rsp error");
-                }
-                DebugAction::RemoveSwBreakpointReq(addr) => {
-                    let res = self.remove_sw_breakpoint(addr).expect("Remove sw breakpoint error");
-                    self.send_cmd(DebugAction::RemoveSwBreakpointRsp(res)).expect("Sending remove sw breakpoint rsp error");
-                }
-                DebugAction::GetCodeSectionOffsetReq => {
-                    let res = self.get_section_offsets().expect("Get section offsets error");
-                    self.send_cmd(DebugAction::GetCodeSectionOffsetRsp(res)).expect("Sending get section offsets rsp error");
-                }
-                _ => {
-                    log::error!("Invalid action encountered: {:?}", req);
-                }
-            }
-
-            cont
+            Ok(VcpuStopReason::Unknown)
         }
     }
 }
@@ -587,63 +528,6 @@ impl KVMDriver {
         sregs.cs.l = 1; // required for 64-bit mode
         vcpu_fd.set_sregs(&sregs)?;
         Ok(())
-    }
-
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    fn run_once(&mut self) -> Result<HyperlightExit> {
-        let result = match self.vcpu_fd.run() {
-            Ok(VcpuExit::Hlt) => {
-                crate::debug!("KVM - Halt Details : {:#?}", &self);
-                HyperlightExit::Halt()
-            }
-            Ok(VcpuExit::IoOut(port, data)) => {
-                // because vcpufd.run() mutably borrows self we cannot pass self to crate::debug! macro here
-                crate::debug!("KVM IO Details : \nPort : {}\nData : {:?}", port, data);
-                // KVM does not need to set RIP or instruction length so these are set to 0
-                HyperlightExit::IoOut(port, data.to_vec(), 0, 0)
-            }
-            Ok(VcpuExit::MmioRead(addr, _)) => {
-                crate::debug!("KVM MMIO Read -Details: Address: {} \n {:#?}", addr, &self);
-
-                match self.get_memory_access_violation(
-                    addr as usize,
-                    &self.mem_regions,
-                    MemoryRegionFlags::READ,
-                ) {
-                    Some(access_violation_exit) => access_violation_exit,
-                    None => HyperlightExit::Mmio(addr),
-                }
-            }
-            Ok(VcpuExit::MmioWrite(addr, _)) => {
-                crate::debug!("KVM MMIO Write -Details: Address: {} \n {:#?}", addr, &self);
-
-                match self.get_memory_access_violation(
-                    addr as usize,
-                    &self.mem_regions,
-                    MemoryRegionFlags::WRITE,
-                ) {
-                    Some(access_violation_exit) => access_violation_exit,
-                    None => HyperlightExit::Mmio(addr),
-                }
-            }
-            #[cfg(gdb)]
-            Ok(VcpuExit::Debug(_)) => HyperlightExit::Debug,
-            Err(e) => match e.errno() {
-                // we send a signal to the thread to cancel execution this results in EINTR being returned by KVM so we return Cancelled
-                libc::EINTR => HyperlightExit::Cancelled(),
-                libc::EAGAIN => HyperlightExit::Retry(),
-                _ => {
-                    crate::debug!("KVM Error -Details: Address: {} \n {:#?}", e, &self);
-                    log_then_return!("Error running VCPU {:?}", e);
-                }
-            },
-            Ok(other) => {
-                crate::debug!("KVM Other Exit {:?}", other);
-                HyperlightExit::Unknown(format!("Unexpected KVM Exit {:?}", other))
-            }
-        };
-
-        Ok(result)
     }
 }
 
@@ -797,52 +681,63 @@ impl Hypervisor for KVMDriver {
 
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn run(&mut self) -> Result<HyperlightExit> {
-        #[cfg(gdb)]
-        loop {
-            let mut result = self.run_once();
+        let result = match self.vcpu_fd.run() {
+            Ok(VcpuExit::Hlt) => {
+                crate::debug!("KVM - Halt Details : {:#?}", &self);
+                HyperlightExit::Halt()
+            }
+            Ok(VcpuExit::IoOut(port, data)) => {
+                // because vcpufd.run() mutably borrows self we cannot pass self to crate::debug! macro here
+                crate::debug!("KVM IO Details : \nPort : {}\nData : {:?}", port, data);
+                // KVM does not need to set RIP or instruction length so these are set to 0
+                HyperlightExit::IoOut(port, data.to_vec(), 0, 0)
+            }
+            Ok(VcpuExit::MmioRead(addr, _)) => {
+                crate::debug!("KVM MMIO Read -Details: Address: {} \n {:#?}", addr, &self);
 
-            result = match result {
-                Ok(HyperlightExit::Debug) => {
-                    log::debug!("Sending gdb message to notify KVM_EXIT_DEBUG");
-                    self
-                        .send_cmd(DebugAction::VcpuStopped(self.get_stop_reason().expect("Cannot get stop reason")))
-                        .map_err(|e| {
-                            new_error!("Couldn't signal vCPU stopped event to GDB thread: {:?}", e)
-                        })?;
-
-                    let result = loop {
-
-                        log::debug!("Debug wait for event to resume vCPU");
-                        if let Ok(req) = self.wait_cmd() {
-                            let cont = self.process_request(req);
-
-                            if cont {
-                                // Run vCPU
-                                break true;
-                            }
-                        }
-                        else {
-                            // Error encountered
-                            break false;
-                        }
-                    };
-
-                    if result {
-                        continue;
-                    }
-
-                    Ok(HyperlightExit::Unknown(
-                        "KVM Debug Exit failed to receive debug event from GDB".to_string(),
-                    ))
+                match self.get_memory_access_violation(
+                    addr as usize,
+                    &self.mem_regions,
+                    MemoryRegionFlags::READ,
+                ) {
+                    Some(access_violation_exit) => access_violation_exit,
+                    None => HyperlightExit::Mmio(addr),
                 }
-                e => e,
-            };
+            }
+            Ok(VcpuExit::MmioWrite(addr, _)) => {
+                crate::debug!("KVM MMIO Write -Details: Address: {} \n {:#?}", addr, &self);
 
-            break result;
-        }
+                match self.get_memory_access_violation(
+                    addr as usize,
+                    &self.mem_regions,
+                    MemoryRegionFlags::WRITE,
+                ) {
+                    Some(access_violation_exit) => access_violation_exit,
+                    None => HyperlightExit::Mmio(addr),
+                }
+            }
+            #[cfg(gdb)]
+            Ok(VcpuExit::Debug(_)) => {
+                let reason = self.get_stop_reason().map_err(|_| new_error!("Cannot get stop reason"))?;
 
-        #[cfg(not(gdb))]
-        self.run_once()
+                HyperlightExit::Debug(reason)
+            }
+            Err(e) => match e.errno() {
+                // we send a signal to the thread to cancel execution this results in EINTR being returned by KVM so we return Cancelled
+                libc::EINTR => HyperlightExit::Cancelled(),
+                libc::EAGAIN => HyperlightExit::Retry(),
+                _ => {
+                    crate::debug!("KVM Error -Details: Address: {} \n {:#?}", e, &self);
+                    log_then_return!("Error running VCPU {:?}", e);
+                }
+            },
+            Ok(other) => {
+                crate::debug!("KVM Other Exit {:?}", other);
+                HyperlightExit::Unknown(format!("Unexpected KVM Exit {:?}", other))
+            }
+        };
+
+        Ok(result)
     }
 
     #[instrument(skip_all, parent = Span::current(), level = "Trace")]
@@ -854,12 +749,100 @@ impl Hypervisor for KVMDriver {
     fn get_memory_regions(&self) -> &[MemoryRegion] {
         &self.mem_regions
     }
+
+    #[cfg(gdb)]
+    fn process_dbg_request(&mut self,
+        req: DebugAction,
+        dbg_mem_access_fn: Arc<Mutex<dyn super::handlers::DbgMemAccessHandlerCaller>>,
+    ) -> Result<DebugAction> {
+        use crate::hypervisor::gdb::X86_64Regs;
+
+        match req {
+            DebugAction::ContinueReq => {
+                self.set_single_step(false);
+                Ok(DebugAction::ContinueRsp)
+            }
+            DebugAction::StepReq => {
+                self.set_single_step(true);
+                Ok(DebugAction::StepRsp)
+            }
+
+            DebugAction::ReadRegistersReq => {
+                let mut regs = X86_64Regs::default();
+                self.read_regs(&mut regs).expect("Read Regs error");
+                Ok(DebugAction::ReadRegistersRsp(regs))
+            }
+            DebugAction::WriteRegistersReq(regs) => {
+                self.write_regs(&regs).expect("Write Regs error");
+                Ok(DebugAction::WriteRegistersRsp)
+
+            }
+
+            DebugAction::ReadAddrReq(addr, len) => {
+                let mut data = vec![0u8; len];
+
+                self.read_addrs(addr, &mut data, dbg_mem_access_fn.clone())?;
+
+                Ok(DebugAction::ReadAddrRsp(data))
+            }
+
+            DebugAction::WriteAddrReq(addr, data) => {
+                self.write_addrs(addr, &data, dbg_mem_access_fn.clone())?;
+
+                Ok(DebugAction::WriteAddrRsp)
+            }
+
+            DebugAction::AddHwBreakpointReq(addr) => {
+                let res = self.add_hw_breakpoint(addr).expect("Add hw breakpoint error");
+                Ok(DebugAction::AddHwBreakpointRsp(res))
+            }
+            DebugAction::RemoveHwBreakpointReq(addr) => {
+                let res = self.remove_hw_breakpoint(addr).expect("Remove hw breakpoint error");
+                Ok(DebugAction::RemoveHwBreakpointRsp(res))
+            }
+
+            DebugAction::AddSwBreakpointReq(addr) => {
+                let res = self.add_sw_breakpoint(addr, dbg_mem_access_fn.clone()).expect("Add sw breakpoint error");
+
+                Ok(DebugAction::AddSwBreakpointRsp(res))
+            }
+            DebugAction::RemoveSwBreakpointReq(addr) => {
+                let res = self.remove_sw_breakpoint(addr, dbg_mem_access_fn.clone()).expect("Remove sw breakpoint error");
+                Ok(DebugAction::RemoveSwBreakpointRsp(res))
+            }
+            DebugAction::GetCodeSectionOffsetReq => {
+                let offset = dbg_mem_access_fn
+                    .clone()
+                    .try_lock()
+                    .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+                    .get_code_offset()?;
+                
+                Ok(DebugAction::GetCodeSectionOffsetRsp(offset as u64))
+            }
+            _ => {
+                log::error!("Invalid action encountered: {:?}", req);
+                Err(new_error!("Invalid action encountered: {:?}", req))
+            }
+        }
+    }
+
+    #[cfg(gdb)]
+    fn recv_dbg_msg(&mut self) -> Result<DebugAction> {
+        self.gdb_conn.recv().map_err(|_| new_error!("Cannot receive"))
+    }
+
+    #[cfg(gdb)]
+    fn send_dbg_msg(&mut self, cmd: DebugAction) -> Result<()> {
+        log::debug!("Sending {:?}", cmd);
+
+        self.gdb_conn.send(cmd).map_err(|_| new_error!("Cannot send"))
+    }
 }
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::hypervisor::handlers::{MemAccessHandler, OutBHandler};
+    use crate::hypervisor::handlers::{DbgMemAccessHandler, MemAccessHandler, OutBHandler};
     use crate::hypervisor::tests::test_initialise;
     use crate::Result;
 
@@ -878,6 +861,18 @@ mod tests {
             let func: Box<dyn FnMut() -> Result<()> + Send> = Box::new(|| -> Result<()> { Ok(()) });
             Arc::new(Mutex::new(MemAccessHandler::from(func)))
         };
-        test_initialise(outb_handler, mem_access_handler).unwrap();
+        #[cfg(gdb)]
+        let dbg_mem_access_handler = {
+            let read: Box<dyn FnMut(usize, &mut [u8]) -> Result<()> + Send> = Box::new(|_: usize, _: &mut [u8]| -> Result<()> { Ok(()) });
+            let write: Box<dyn FnMut(usize, &[u8]) -> Result<()> + Send> = Box::new(|_: usize, _: &[u8]| -> Result<()> { Ok(()) });
+            Arc::new(Mutex::new(DbgMemAccessHandler::from((read, write))))
+        };
+
+        test_initialise(
+            outb_handler,
+            mem_access_handler,
+            #[cfg(gdb)]
+            dbg_mem_access_handler,
+            ).unwrap();
     }
 }

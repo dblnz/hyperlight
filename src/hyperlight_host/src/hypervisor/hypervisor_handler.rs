@@ -92,8 +92,7 @@ impl HypervisorHandler {
 #[derive(Clone)]
 struct HvHandlerExecVars {
     join_handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
-    #[allow(clippy::type_complexity)] // TODO: Change this type
-    shm: Arc<Mutex<Option<SandboxMemoryManager>>>,
+    shm: Arc<Mutex<Option<SandboxMemoryManager<GuestSharedMemory>>>>,
     timeout: Arc<Mutex<Duration>>,
     #[cfg(target_os = "linux")]
     thread_id: Arc<Mutex<Option<libc::pthread_t>>>,
@@ -841,15 +840,14 @@ pub enum HandlerMsg {
 }
 
 fn set_up_hypervisor_partition(
-    mgr: &mut Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
+    mgr: &mut SandboxMemoryManager<GuestSharedMemory>,
     #[allow(unused_variables)] // parameter only used for in-process mode
     outb_handler: OutBHandlerWrapper,
 ) -> Result<Box<dyn Hypervisor>> {
-    let mut mgr_g = mgr.lock().unwrap();
-    let mem_size = u64::try_from(mgr_g.shared_mem.mem_size())?;
-    let mut regions = mgr_g.layout.get_memory_regions(&mgr_g.shared_mem)?;
+    let mem_size = u64::try_from(mgr.shared_mem.mem_size())?;
+    let mut regions = mgr.layout.get_memory_regions(&mgr.shared_mem)?;
     let rsp_ptr = {
-        let rsp_u64 = mgr_g.set_up_shared_memory(mem_size, &mut regions)?;
+        let rsp_u64 = mgr.set_up_shared_memory(mem_size, &mut regions)?;
         let rsp_raw = RawPtr::from(rsp_u64);
         GuestPtr::try_from(rsp_raw)
     }?;
@@ -859,7 +857,7 @@ fn set_up_hypervisor_partition(
         base_ptr + Offset::from(pml4_offset_u64)
     };
     let entrypoint_ptr = {
-        let entrypoint_total_offset = mgr_g.load_addr.clone() + mgr_g.entrypoint_offset;
+        let entrypoint_total_offset = mgr.load_addr.clone() + mgr.entrypoint_offset;
         GuestPtr::try_from(entrypoint_total_offset)
     }?;
 
@@ -877,8 +875,7 @@ fn set_up_hypervisor_partition(
             pml4_ptr
         );
     }
-    let is_in_process = mgr_g.is_in_process();
-    drop(mgr_g);
+    let is_in_process = mgr.is_in_process();
 
     if is_in_process {
         cfg_if::cfg_if! {
@@ -888,7 +885,6 @@ fn set_up_hypervisor_partition(
                 use crate::sandbox::leaked_outb::LeakedOutBWrapper;
                 use super::inprocess::InprocessDriver;
 
-                let mut mgr = mgr.lock().unwrap();
                 let leaked_outb_wrapper = LeakedOutBWrapper::new(&mut mgr, outb_handler)?;
                 let hv = InprocessDriver::new(InprocessArgs {
                     entrypoint_raw: u64::from(mgr.load_addr.clone() + mgr.entrypoint_offset),
@@ -923,8 +919,6 @@ fn set_up_hypervisor_partition(
             #[cfg(kvm)]
             Some(HypervisorType::Kvm) => {
                 let hv = crate::hypervisor::kvm::KVMDriver::new(
-                    #[cfg(gdb)]
-                    mgr.clone(),
                     regions,
                     pml4_ptr.absolute()?,
                     entrypoint_ptr.absolute()?,
@@ -935,16 +929,14 @@ fn set_up_hypervisor_partition(
 
             #[cfg(target_os = "windows")]
             Some(HypervisorType::Whp) => {
-                let mgr_lock = mgr.lock().unwrap();
-
                 let mmap_file_handle = mgr
                     .shared_mem
                     .with_exclusivity(|e| e.get_mmap_file_handle())?;
 
                 let hv = crate::hypervisor::hyperv_windows::HypervWindowsDriver::new(
                     regions,
-                    mgr_lock.shared_mem.raw_mem_size(), // we use raw_* here because windows driver requires 64K aligned addresses,
-                    mgr_lock.shared_mem.raw_ptr() as *mut c_void, // and instead convert it to base_addr where needed in the driver itself
+                    mgr.shared_mem.raw_mem_size(), // we use raw_* here because windows driver requires 64K aligned addresses,
+                    mgr.shared_mem.raw_ptr() as *mut c_void, // and instead convert it to base_addr where needed in the driver itself
                     pml4_ptr.absolute()?,
                     entrypoint_ptr.absolute()?,
                     rsp_ptr.absolute()?,

@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use gdb::{DebugAction, GdbConnection, VcpuStopReason};
 use handlers::{DbgMemAccessHandlerCaller, DbgMemAccessHandlerWrapper};
 use tracing::{instrument, Span};
 
@@ -90,10 +91,9 @@ pub(crate) const EFER_NX: u64 = 1 << 11;
 /// These are the generic exit reasons that we can handle from a Hypervisor the Hypervisors run method is responsible for mapping from
 /// the hypervisor specific exit reasons to these generic ones
 pub enum HyperlightExit {
+    #[cfg(gdb)]
     /// The vCPU has exited due to a debug event
-    Debug,
-    DebugReadMem,
-    DebugWriteMem,
+    Debug(VcpuStopReason),
     /// The vCPU has halted
     Halt(),
     /// The vCPU has issued a write to the given port with the given value
@@ -202,6 +202,22 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
 
     #[cfg(crashdump)]
     fn get_memory_regions(&self) -> &[MemoryRegion];
+
+    #[cfg(gdb)]
+    fn process_dbg_request(&mut self,
+        _req: gdb::DebugAction,
+        dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
+        ) -> Result<DebugAction> {
+        unimplemented!()
+    }
+    #[cfg(gdb)]
+    fn send_dbg_msg(&mut self, _: DebugAction) -> Result<()> {
+        unimplemented!()
+    }
+    #[cfg(gdb)]
+    fn recv_dbg_msg(&mut self) -> Result<DebugAction> {
+        unimplemented!()
+    }
 }
 
 /// A virtual CPU that can be run until an exit occurs
@@ -220,27 +236,45 @@ impl VirtualCPU {
     ) -> Result<()> {
         loop {
             match hv.run() {
-                Ok(HyperlightExit::Debug) => {
-                    log_then_return!("Unexpected Debug Exit");
-                }
-                Ok(HyperlightExit::DebugReadMem(addr, data)) => {
-                    dbg_mem_access_fn
-                        .clone()
-                        .try_lock()
-                        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-                        .read(addr, data)?;
+                #[cfg(gdb)]
+                Ok(HyperlightExit::Debug(stop_reason)) => {
 
-                    continue;
-                }
-                Ok(HyperlightExit::DebugWriteMem(addr, data)) => {
-                    dbg_mem_access_fn
-                        .clone()
-                        .try_lock()
-                        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
-                        .write(addr, data)?;
+                    log::debug!("Sending gdb message to notify KVM_EXIT_DEBUG");
 
-                    continue;
+                    hv.send_dbg_msg(DebugAction::VcpuStopped(stop_reason))
+                        .map_err(|e| {
+                            new_error!("Couldn't signal vCPU stopped event to GDB thread: {:?}", e)
+                        })?;
+
+                    let result = loop {
+                        log::debug!("Debug wait for event to resume vCPU");
+                        if let Ok(req) = hv.recv_dbg_msg() {
+                            let response = hv.process_dbg_request(req, dbg_mem_access_fn.clone())?;
+
+                            let cont = match response {
+                                DebugAction::StepRsp | DebugAction::ContinueRsp => true,
+                                _ => false,
+                            };
+
+                            hv.send_dbg_msg(response);
+
+                            if cont {
+                                break true;
+                            }
+                        }
+                        else {
+                            // Error encountered
+                            break false;
+                        }
+                    };
+
+                    if result {
+                        continue;
+                    } else {
+                        log_then_return!("Unexpected Debug Exit");
+                    }
                 }
+
                 Ok(HyperlightExit::Halt()) => {
                     break;
                 }
@@ -313,7 +347,7 @@ pub(crate) mod tests {
 
     use hyperlight_testing::dummy_guest_as_string;
 
-    use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
+    use super::handlers::{DbgMemAccessHandlerWrapper, MemAccessHandlerWrapper, OutBHandlerWrapper};
     use crate::hypervisor::hypervisor_handler::{
         HvHandlerConfig, HypervisorHandler, HypervisorHandlerAction,
     };
@@ -325,6 +359,8 @@ pub(crate) mod tests {
     pub(crate) fn test_initialise(
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
+        #[cfg(gdb)]
+        dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let filename = dummy_guest_as_string().map_err(|e| new_error!("{}", e))?;
         if !Path::new(&filename).exists() {
@@ -342,6 +378,7 @@ pub(crate) mod tests {
         let hv_handler_config = HvHandlerConfig {
             outb_handler: outb_hdl,
             mem_access_handler: mem_access_hdl,
+            dbg_mem_access_handler: dbg_mem_access_fn,
             seed: 1234567890,
             page_size: 4096,
             peb_addr: RawPtr::from(0x230000),
