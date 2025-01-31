@@ -2,7 +2,6 @@
 use crossbeam_channel::TryRecvError;
 use gdbstub::arch::Arch;
 use gdbstub::common::Signal;
-use gdbstub::stub::SingleThreadStopReason;
 use gdbstub::target::ext::base::singlethread::{
     SingleThreadBase, SingleThreadResume, SingleThreadResumeOps, SingleThreadSingleStep,
     SingleThreadSingleStepOps,
@@ -15,7 +14,7 @@ use gdbstub::target::ext::section_offsets::{Offsets, SectionOffsets};
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::x86::X86_64_SSE as GdbTargetArch;
 
-use super::{DebugAction, GdbConnection, GdbTargetError, VcpuStopReason, X86_64Regs};
+use super::{DebugAction, GdbConnection, GdbTargetError, X86_64Regs};
 use crate::hypervisor::gdb::GdbDebug;
 
 
@@ -56,27 +55,17 @@ impl GdbDebug for HyperlightSandboxTarget {
         self.hyp_conn.try_recv()
     }
 
-    fn get_stop_reason(
-        &self,
-        reason: VcpuStopReason,
-    ) -> SingleThreadStopReason<<Self::Arch as Arch>::Usize> {
-
-        match reason {
-            VcpuStopReason::DoneStep => SingleThreadStopReason::DoneStep,
-            VcpuStopReason::SwBp => SingleThreadStopReason::SwBreak(()),
-            VcpuStopReason::HwBp => SingleThreadStopReason::HwBreak(()),
-        }
-    }
-
     /// Sends an event to the Hypervisor that tells it to resume vCPU execution
     /// Note: The method waits for a confirmation message
     fn resume_vcpu(&mut self) -> Result<(), Self::Error> {
         log::info!("Attempted to resume vCPU");
-        if let DebugAction::ContinueRsp = self.send_command(DebugAction::ContinueReq)? {
-            Ok(())
-        } else {
-            log::error!("Didn't receive ContinueRsp");
-            Err(GdbTargetError::UnexpectedMessageError)
+
+        match self.send_command(DebugAction::ContinueReq)? {
+            DebugAction::ContinueRsp => Ok(()),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(GdbTargetError::UnexpectedMessageError)
+            }
         }
     }
 }
@@ -114,12 +103,16 @@ impl SingleThreadBase for HyperlightSandboxTarget {
     ) -> TargetResult<usize, Self> {
         log::debug!("Read addr: {:X} len: {:X}", gva, data.len());
 
-        if let DebugAction::ReadAddrRsp(v) = self.send_command(DebugAction::ReadAddrReq(gva, data.len()))? {
-            data.copy_from_slice(&v);
+        match self.send_command(DebugAction::ReadAddrReq(gva, data.len()))? {
+            DebugAction::ReadAddrRsp(v) => {
+                data.copy_from_slice(&v);
 
-            Ok(v.len())
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+                Ok(v.len())
+            }
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 
@@ -131,10 +124,12 @@ impl SingleThreadBase for HyperlightSandboxTarget {
         log::debug!("Write addr: {:X} len: {:X}", gva, data.len());
         let v = Vec::from(data);
 
-        if let DebugAction::WriteAddrRsp = self.send_command(DebugAction::WriteAddrReq(gva, v))? {
-            Ok(())
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::WriteAddrReq(gva, v))? {
+            DebugAction::WriteAddrRsp => Ok(()),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 
@@ -142,31 +137,36 @@ impl SingleThreadBase for HyperlightSandboxTarget {
         &mut self,
         regs: &mut <Self::Arch as Arch>::Registers,
     ) -> TargetResult<(), Self> {
-        if let DebugAction::ReadRegistersRsp(read_regs) = self.send_command(DebugAction::ReadRegistersReq)? {
-            log::debug!("Got regs: {:?}", read_regs);
-            regs.regs[0] = read_regs.rax;
-            regs.regs[1] = read_regs.rbp;
-            regs.regs[2] = read_regs.rcx;
-            regs.regs[3] = read_regs.rdx;
-            regs.regs[4] = read_regs.rsi;
-            regs.regs[5] = read_regs.rdi;
-            regs.regs[6] = read_regs.rbp;
-            regs.regs[7] = read_regs.rsp;
-            regs.regs[8] = read_regs.r8;
-            regs.regs[9] = read_regs.r9;
-            regs.regs[10] = read_regs.r10;
-            regs.regs[11] = read_regs.r11;
-            regs.regs[12] = read_regs.r12;
-            regs.regs[13] = read_regs.r13;
-            regs.regs[14] = read_regs.r14;
-            regs.regs[15] = read_regs.r15;
-            regs.rip = read_regs.rip;
-            regs.eflags = u32::try_from(read_regs.rflags).expect("Couldn't convert rflags from u64 to u32");
-            log::debug!("filled regs: {:?}", regs);
+        log::debug!("Read regs");
 
-            Ok(())
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::ReadRegistersReq)? {
+            DebugAction::ReadRegistersRsp(read_regs) => {
+                regs.regs[0] = read_regs.rax;
+                regs.regs[1] = read_regs.rbp;
+                regs.regs[2] = read_regs.rcx;
+                regs.regs[3] = read_regs.rdx;
+                regs.regs[4] = read_regs.rsi;
+                regs.regs[5] = read_regs.rdi;
+                regs.regs[6] = read_regs.rbp;
+                regs.regs[7] = read_regs.rsp;
+                regs.regs[8] = read_regs.r8;
+                regs.regs[9] = read_regs.r9;
+                regs.regs[10] = read_regs.r10;
+                regs.regs[11] = read_regs.r11;
+                regs.regs[12] = read_regs.r12;
+                regs.regs[13] = read_regs.r13;
+                regs.regs[14] = read_regs.r14;
+                regs.regs[15] = read_regs.r15;
+                regs.rip = read_regs.rip;
+                regs.eflags = u32::try_from(read_regs.rflags).expect("Couldn't convert rflags from u64 to u32");
+
+                Ok(())
+            }
+
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 
@@ -195,10 +195,12 @@ impl SingleThreadBase for HyperlightSandboxTarget {
             rflags: u64::try_from(regs.eflags).expect("Couldn't convert eflags from u32 to u64"),
         };
 
-        if let DebugAction::WriteRegistersRsp = self.send_command(DebugAction::WriteRegistersReq(regs))? {
-            Ok(())
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::WriteRegistersReq(regs))? {
+            DebugAction::WriteRegistersRsp => Ok(()),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 
@@ -211,16 +213,18 @@ impl SectionOffsets for HyperlightSandboxTarget {
     fn get_section_offsets(&mut self) -> Result<Offsets<<Self::Arch as Arch>::Usize>, Self::Error> {
         log::debug!("Get section offsets");
 
-        if let DebugAction::GetCodeSectionOffsetRsp(text) = self.send_command(DebugAction::GetCodeSectionOffsetReq)? {
-            log::debug!("Get section offsets got {:X}", text);
-            Ok(Offsets::Segments {
-                text_seg: text as u64,
-                data_seg: None,
-            })
-        } else {
-            Err(GdbTargetError::UnexpectedMessageError)
+        match self.send_command(DebugAction::GetCodeSectionOffsetReq)? {
+            DebugAction::GetCodeSectionOffsetRsp(text) => {
+                Ok(Offsets::Segments {
+                    text_seg: text as u64,
+                    data_seg: None,
+                })
+            }
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(GdbTargetError::UnexpectedMessageError)
+            }
         }
-
     }
 }
 
@@ -248,10 +252,12 @@ impl HwBreakpoint for HyperlightSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Add hw breakpoint at address {:X}", addr);
 
-        if let DebugAction::AddHwBreakpointRsp(rsp) = self.send_command(DebugAction::AddHwBreakpointReq(addr))? {
-            Ok(rsp)
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::AddHwBreakpointReq(addr))? {
+            DebugAction::AddHwBreakpointRsp(rsp) => Ok(rsp),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 
@@ -264,10 +270,12 @@ impl HwBreakpoint for HyperlightSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Remove hw breakpoint at address {:X}", addr);
 
-        if let DebugAction::RemoveHwBreakpointRsp(rsp) = self.send_command(DebugAction::RemoveHwBreakpointReq(addr))? {
-            Ok(rsp)
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::RemoveHwBreakpointReq(addr))? {
+            DebugAction::RemoveHwBreakpointRsp(rsp) => Ok(rsp),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 }
@@ -285,10 +293,12 @@ impl SwBreakpoint for HyperlightSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Add sw breakpoint at address {:X}", addr);
 
-        if let DebugAction::AddSwBreakpointRsp(rsp) = self.send_command(DebugAction::AddSwBreakpointReq(addr))? {
-            Ok(rsp)
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::AddSwBreakpointReq(addr))? {
+            DebugAction::AddSwBreakpointRsp(rsp) => Ok(rsp),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 
@@ -301,10 +311,12 @@ impl SwBreakpoint for HyperlightSandboxTarget {
     ) -> TargetResult<bool, Self> {
         log::debug!("Remove sw breakpoint at address {:X}", addr);
 
-        if let DebugAction::RemoveSwBreakpointRsp(rsp) = self.send_command(DebugAction::RemoveSwBreakpointReq(addr))? {
-            Ok(rsp)
-        } else {
-            Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+        match self.send_command(DebugAction::RemoveSwBreakpointReq(addr))? {
+            DebugAction::RemoveSwBreakpointRsp(rsp) => Ok(rsp),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
+                Err(TargetError::Fatal(GdbTargetError::UnexpectedMessageError))
+            }
         }
     }
 }
@@ -324,12 +336,13 @@ impl SingleThreadSingleStep for HyperlightSandboxTarget {
         assert!(signal.is_none());
 
         log::debug!("Step");
-        if let DebugAction::StepRsp = self.send_command(DebugAction::StepReq)? {
-            log::debug!("Got StepRsp");
+        match self.send_command(DebugAction::StepReq)? {
+            DebugAction::StepRsp => Ok(()),
+            msg => {
+                log::error!("Unexpected message received: {:?}", msg);
 
-            Ok(())
-        } else {
-            Err(GdbTargetError::UnexpectedMessageError)
+                Err(GdbTargetError::UnexpectedMessageError)
+            }
         }
     }
 }

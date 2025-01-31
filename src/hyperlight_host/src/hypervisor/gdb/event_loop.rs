@@ -37,7 +37,13 @@ impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T> {
 
                     // Resume execution if unknown reason for stop
                     let stop_response = match stop_reason {
-                        Some(reason) => target.get_stop_reason(reason),
+                        Some(reason) => {
+                            match reason {
+                                VcpuStopReason::DoneStep => BaseStopReason::DoneStep,
+                                VcpuStopReason::SwBp => BaseStopReason::SwBreak(()),
+                                VcpuStopReason::HwBp => BaseStopReason::HwBreak(()),
+                            }
+                        }
                         None => {
                             target
                                 .resume_vcpu()
@@ -46,13 +52,11 @@ impl<T: GdbDebug> run_blocking::BlockingEventLoop for GdbBlockingEventLoop<T> {
                             continue;
                         }
                     };
-                    log::debug!("Translated stop response {:?}", stop_response);
 
                     return Ok(run_blocking::Event::TargetStopped(stop_response));
                 }
-                Ok(m) => {
-                    log::error!("Invalid message got here {:?}", m);
-
+                Ok(msg) => {
+                    log::error!("Unexpected message received {:?}", msg);
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => (),
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {

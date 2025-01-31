@@ -7,9 +7,8 @@ use std::thread;
 
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use event_loop::event_loop_thread;
-use gdbstub::arch::Arch;
 use gdbstub::conn::ConnectionExt;
-use gdbstub::stub::{GdbStub, SingleThreadStopReason};
+use gdbstub::stub::GdbStub;
 use gdbstub::target::{Target, TargetError};
 use thiserror::Error;
 
@@ -85,11 +84,6 @@ pub trait GdbDebug: Target {
 
     /// Resumes the vCPU
     fn resume_vcpu(&mut self) -> Result<(), <Self as Target>::Error>;
-    /// Returns the reason why vCPU stopped
-    fn get_stop_reason(
-        &self,
-        reason: VcpuStopReason,
-    ) -> SingleThreadStopReason<<Self::Arch as Arch>::Usize>;
 }
 
 #[derive(Debug, Default)]
@@ -174,8 +168,8 @@ pub struct GdbConnection {
 
 impl GdbConnection {
     pub fn new_pair() -> (Self, Self) {
-        let (hyp_tx, gdb_rx) = crossbeam_channel::unbounded();
-        let (gdb_tx, hyp_rx) = crossbeam_channel::unbounded();
+        let (hyp_tx, gdb_rx): (Sender<DebugAction>, Receiver<DebugAction>) = crossbeam_channel::unbounded();
+        let (gdb_tx, hyp_rx): (Sender<DebugAction>, Receiver<DebugAction>) = crossbeam_channel::unbounded();
 
         let gdb_conn = GdbConnection {
             tx: gdb_tx,
