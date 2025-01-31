@@ -29,7 +29,7 @@ use tracing::{instrument, Span};
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
 use super::gdb::{self, kvm_target::HyperlightSandboxTarget, GdbConnection};
-use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
+use super::handlers::{DbgMemAccessHandlerWrapper, MemAccessHandlerWrapper, OutBHandlerWrapper};
 use super::{
     HyperlightExit, Hypervisor, VirtualCPU, CR0_AM, CR0_ET, CR0_MP, CR0_NE, CR0_PE, CR0_PG, CR0_WP,
     CR4_OSFXSR, CR4_OSXMMEXCPT, CR4_PAE, EFER_LMA, EFER_LME, EFER_NX, EFER_SCE,
@@ -501,9 +501,8 @@ pub(super) struct KVMDriver {
 
     #[cfg(gdb)]
     debug: debug::KvmDebug,
+    #[cfg(gdb)]
     gdb_conn: GdbConnection,
-    /// Memory manager that grants access to guest's memory
-    mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
 }
 
 impl KVMDriver {
@@ -512,7 +511,6 @@ impl KVMDriver {
     /// be called to do so.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub(super) fn new(
-        #[cfg(gdb)] mgr: Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>,
         mem_regions: Vec<MemoryRegion>,
         pml4_addr: u64,
         entrypoint: u64,
@@ -557,11 +555,10 @@ impl KVMDriver {
 
             #[cfg(gdb)]
             debug: KvmDebug::new(),
+            #[cfg(gdb)]
             gdb_conn,
-            mgr
         };
         let r = rsp.set_entrypoint_bp();
-        log::debug!("{:?}", r);
 
         Ok(rsp)
     }
@@ -689,6 +686,8 @@ impl Hypervisor for KVMDriver {
         outb_hdl: OutBHandlerWrapper,
         mem_access_hdl: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        #[cfg(gdb)]
+        dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         let regs = kvm_regs {
             rip: self.entrypoint,
@@ -709,6 +708,8 @@ impl Hypervisor for KVMDriver {
             hv_handler,
             outb_hdl,
             mem_access_hdl,
+            #[cfg(gdb)]
+            dbg_mem_access_fn,
         )?;
 
         // reset RSP to what it was before initialise
@@ -726,6 +727,8 @@ impl Hypervisor for KVMDriver {
         outb_handle_fn: OutBHandlerWrapper,
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        #[cfg(gdb)]
+        dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()> {
         // Reset general purpose registers except RSP, then set RIP
 
@@ -753,6 +756,8 @@ impl Hypervisor for KVMDriver {
             hv_handler,
             outb_handle_fn,
             mem_access_fn,
+            #[cfg(gdb)]
+            dbg_mem_access_fn,
         )?;
 
         // reset RSP to what it was before function call

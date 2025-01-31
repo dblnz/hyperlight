@@ -28,6 +28,8 @@ use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::GuestSharedMemory;
 use crate::sandbox::host_funcs::HostFuncsWrapper;
 use crate::sandbox::mem_access::mem_access_handler_wrapper;
+#[cfg(gdb)]
+use super::mem_access::dbg_mem_access_handler_wrapper;
 use crate::sandbox::outb::outb_handler_wrapper;
 use crate::sandbox::{HostSharedMemory, MemMgrWrapper};
 use crate::sandbox_state::sandbox::Sandbox;
@@ -101,6 +103,8 @@ fn hv_init(
 ) -> Result<HypervisorHandler> {
     let outb_hdl = outb_handler_wrapper(hshm.clone(), host_funcs);
     let mem_access_hdl = mem_access_handler_wrapper(hshm.clone());
+    let dbg_mem_access_hdl = dbg_mem_access_handler_wrapper(hshm.clone());
+
     let seed = {
         let mut rng = rand::thread_rng();
         rng.gen::<u64>()
@@ -113,6 +117,7 @@ fn hv_init(
     let hv_handler_config = HvHandlerConfig {
         outb_handler: outb_hdl,
         mem_access_handler: mem_access_hdl,
+        dbg_mem_access_handler: dbg_mem_access_hdl,
         seed,
         page_size,
         peb_addr,

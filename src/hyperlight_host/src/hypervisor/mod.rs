@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use handlers::{DbgMemAccessHandlerCaller, DbgMemAccessHandlerWrapper};
 use tracing::{instrument, Span};
 
 use crate::error::HyperlightError::ExecutionCanceledByHost;
@@ -91,6 +92,8 @@ pub(crate) const EFER_NX: u64 = 1 << 11;
 pub enum HyperlightExit {
     /// The vCPU has exited due to a debug event
     Debug,
+    DebugReadMem,
+    DebugWriteMem,
     /// The vCPU has halted
     Halt(),
     /// The vCPU has issued a write to the given port with the given value
@@ -124,6 +127,8 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
         outb_handle_fn: OutBHandlerWrapper,
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        #[cfg(gdb)]
+        dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()>;
 
     /// Dispatch a call from the host to the guest using the given pointer
@@ -139,6 +144,8 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
         outb_handle_fn: OutBHandlerWrapper,
         mem_access_fn: MemAccessHandlerWrapper,
         hv_handler: Option<HypervisorHandler>,
+        #[cfg(gdb)]
+        dbg_mem_access_fn: DbgMemAccessHandlerWrapper,
     ) -> Result<()>;
 
     /// Handle an IO exit from the internally stored vCPU.
@@ -208,11 +215,31 @@ impl VirtualCPU {
         hv_handler: Option<HypervisorHandler>,
         outb_handle_fn: Arc<Mutex<dyn OutBHandlerCaller>>,
         mem_access_fn: Arc<Mutex<dyn MemAccessHandlerCaller>>,
+        #[cfg(gdb)]
+        dbg_mem_access_fn: Arc<Mutex<dyn DbgMemAccessHandlerCaller>>,
     ) -> Result<()> {
         loop {
             match hv.run() {
                 Ok(HyperlightExit::Debug) => {
                     log_then_return!("Unexpected Debug Exit");
+                }
+                Ok(HyperlightExit::DebugReadMem(addr, data)) => {
+                    dbg_mem_access_fn
+                        .clone()
+                        .try_lock()
+                        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+                        .read(addr, data)?;
+
+                    continue;
+                }
+                Ok(HyperlightExit::DebugWriteMem(addr, data)) => {
+                    dbg_mem_access_fn
+                        .clone()
+                        .try_lock()
+                        .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?
+                        .write(addr, data)?;
+
+                    continue;
                 }
                 Ok(HyperlightExit::Halt()) => {
                     break;

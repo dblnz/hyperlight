@@ -57,6 +57,8 @@ use crate::HyperlightError::{
 };
 use crate::{log_then_return, new_error, HyperlightError, Result};
 
+use super::handlers::DbgMemAccessHandlerWrapper;
+
 type HypervisorHandlerTx = Sender<HypervisorHandlerAction>;
 type HypervisorHandlerRx = Receiver<HypervisorHandlerAction>;
 type HandlerMsgTx = Sender<HandlerMsg>;
@@ -91,7 +93,7 @@ impl HypervisorHandler {
 struct HvHandlerExecVars {
     join_handle: Arc<Mutex<Option<JoinHandle<Result<()>>>>>,
     #[allow(clippy::type_complexity)] // TODO: Change this type
-    shm: Arc<Mutex<Option<Arc<Mutex<SandboxMemoryManager<GuestSharedMemory>>>>>>,
+    shm: Arc<Mutex<Option<SandboxMemoryManager>>>,
     timeout: Arc<Mutex<Duration>>,
     #[cfg(target_os = "linux")]
     thread_id: Arc<Mutex<Option<libc::pthread_t>>>,
@@ -186,6 +188,8 @@ pub(crate) struct HvHandlerConfig {
     pub(crate) outb_handler: OutBHandlerWrapper,
     pub(crate) mem_access_handler: MemAccessHandlerWrapper,
     pub(crate) max_wait_for_cancellation: Duration,
+    #[cfg(gdb)]
+    pub(crate) dbg_mem_access_handler: DbgMemAccessHandlerWrapper,
 }
 
 impl HypervisorHandler {
@@ -237,7 +241,6 @@ impl HypervisorHandler {
         let configuration = self.configuration.clone();
         #[cfg(target_os = "windows")]
         let in_process = sandbox_memory_manager.is_in_process();
-        let sandbox_memory_manager = Arc::new(Mutex::new(sandbox_memory_manager));
 
         *self.execution_variables.shm.try_lock().unwrap() = Some(sandbox_memory_manager);
 
@@ -317,6 +320,31 @@ impl HypervisorHandler {
 
                                 log::info!("Initialising Hypervisor Handler");
 
+                                let mut evar_lock_guard =
+                                    execution_variables.shm.try_lock().map_err(|e| {
+                                        new_error!(
+                                            "Error locking exec var shm lock: {}:{}: {}",
+                                            file!(),
+                                            line!(),
+                                            e
+                                        )
+                                    })?;
+
+                                // This apparently-useless lock is
+                                // needed to ensure the host does not
+                                // make unsynchronized accesses while
+                                // the guest is executing.  See the
+                                // documentation for
+                                // GuestSharedMemory::lock.
+                                let mem_lock_guard = evar_lock_guard
+                                    .as_mut()
+                                    .ok_or_else(|| {
+                                        new_error!("guest shm lock: {}:{}:", file!(), line!())
+                                    })?
+                                    .shared_mem
+                                    .lock
+                                    .try_read();
+
                                 let res = hv.initialise(
                                     configuration.peb_addr.clone(),
                                     configuration.seed,
@@ -324,7 +352,12 @@ impl HypervisorHandler {
                                     configuration.outb_handler.clone(),
                                     configuration.mem_access_handler.clone(),
                                     Some(hv_handler_clone.clone()),
+                                    #[cfg(gdb)]
+                                    configuration.dbg_mem_access_handler.clone(),
                                 );
+
+                                drop(mem_lock_guard);
+                                drop(evar_lock_guard);
 
                                 execution_variables.running.store(false, Ordering::SeqCst);
 
@@ -374,6 +407,30 @@ impl HypervisorHandler {
                                     .clone()
                                     .ok_or_else(|| new_error!("Hypervisor not initialized"))?;
 
+                                let mut evar_lock_guard =
+                                    execution_variables.shm.try_lock().map_err(|e| {
+                                        new_error!(
+                                            "Error locking exec var shm lock: {}:{}: {}",
+                                            file!(),
+                                            line!(),
+                                            e
+                                        )
+                                    })?;
+                                // This apparently-useless lock is
+                                // needed to ensure the host does not
+                                // make unsynchronized accesses while
+                                // the guest is executing.  See the
+                                // documentation for
+                                // GuestSharedMemory::lock.
+                                let mem_lock_guard = evar_lock_guard
+                                    .as_mut()
+                                    .ok_or_else(|| {
+                                        new_error!("guest shm lock: {}:{}:", file!(), line!())
+                                    })?
+                                    .shared_mem
+                                    .lock
+                                    .try_read();
+
                                 let res = {
                                     #[cfg(feature = "function_call_metrics")]
                                     {
@@ -398,8 +455,12 @@ impl HypervisorHandler {
                                         configuration.outb_handler.clone(),
                                         configuration.mem_access_handler.clone(),
                                         Some(hv_handler_clone.clone()),
+                                        #[cfg(gdb)]
+                                        configuration.dbg_mem_access_handler.clone(),
                                     )
                                 };
+                                drop(mem_lock_guard);
+                                drop(evar_lock_guard);
 
                                 execution_variables.running.store(false, Ordering::SeqCst);
 

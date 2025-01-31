@@ -102,3 +102,60 @@ impl MemAccessHandlerCaller for MemAccessHandler {
         func()
     }
 }
+
+/// The trait representing custom logic to handle the case when
+/// a Hypervisor's virtual CPU (vCPU) informs Hyperlight a debug memory access
+/// has been requested.
+pub trait DbgMemAccessHandlerCaller: Send {
+    /// Function that gets called when a read is requested.
+    fn read(&mut self, addr: usize, data: &mut [u8]) -> Result<()>;
+
+    /// Function that gets called when a write is requested.
+    fn write(&mut self, addr: usize, data: &[u8]) -> Result<()>;
+}
+
+/// A convenient type representing a common way `MemAccessHandler` implementations
+/// are passed as parameters to functions
+///
+/// Note: This needs to be wrapped in a Mutex to be able to grab a mutable
+/// reference to the underlying data (i.e., handle_mmio_exit in `Sandbox` takes
+/// a &mut self).
+pub type DbgMemAccessHandlerWrapper = Arc<Mutex<dyn DbgMemAccessHandlerCaller>>;
+
+pub(crate) type DbgReadMemAccessHandlerFunction = Box<dyn FnMut(usize, &mut [u8]) -> Result<()> + Send>;
+pub(crate) type DbgWriteMemAccessHandlerFunction = Box<dyn FnMut(usize, &[u8]) -> Result<()> + Send>;
+
+/// A `MemAccessHandler` implementation using `MemAccessHandlerFunction`.
+///
+/// Note: This handler must live for as long as its Sandbox or for
+/// static in the case of its C API usage.
+pub(crate) struct DbgMemAccessHandler(Arc<Mutex<DbgReadMemAccessHandlerFunction>>, Arc<Mutex<DbgWriteMemAccessHandlerFunction>>);
+
+impl From<(DbgReadMemAccessHandlerFunction, DbgWriteMemAccessHandlerFunction)> for DbgMemAccessHandler {
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    fn from((f1, f2): (DbgReadMemAccessHandlerFunction, DbgWriteMemAccessHandlerFunction)) -> Self {
+        Self(Arc::new(Mutex::new(f1)), Arc::new(Mutex::new(f2)))
+    }
+}
+
+impl DbgMemAccessHandlerCaller for DbgMemAccessHandler {
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    fn read(&mut self, addr: usize, data: &mut [u8]) -> Result<()> {
+        let mut read_func = self
+            .0
+            .try_lock()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+        
+        read_func(addr, data)
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    fn write(&mut self, addr: usize, data: &[u8]) -> Result<()> {
+        let mut write_func = self
+            .1
+            .try_lock()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+
+        write_func(addr, data)
+    }
+}
