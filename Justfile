@@ -159,6 +159,10 @@ run-rust-examples-linux target=default-target features="": (build-rust target) (
     {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example tracing {{ if features =="" {''} else { "--features " + features } }}
     {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example tracing {{ if features =="" {"--features function_call_metrics" } else {"--features function_call_metrics," + features} }}
 
+# Verify that the debugging works
+run-rust-examples-debugging target=default-target: (build-rust target)
+    {{ set-trace-env-vars }} cargo run --profile={{ if target == "debug" { "dev" } else { target } }} --example guest-debugging --features gdb
+
 # BENCHMARKING
 
 # Warning: can overwrite previous local benchmarks, so run this before running benchmarks

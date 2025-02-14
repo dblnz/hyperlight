@@ -115,6 +115,18 @@ jobs:
           RUST_LOG: debug
         run: just run-rust-examples-linux ${{ matrix.config }} ${{ matrix.hypervisor == 'mshv3' && 'mshv3' || ''}}
 
+      - name: Run Rust Debugging examples - linux
+        if: ${{ (runner.os != 'Windows') && (matrix.config == 'debug') }}
+        env:
+          CARGO_TERM_COLOR: always
+          RUST_LOG: debug
+        run: |
+            just run-rust-examples-debugging ${{ matrix.config }} &
+            gdb --nw -x dev/gdb-test.commands
+            grep -q "Stopped at hyperlight_main breakpoiint" gdb.output
+            rm gdb.output
+
+
       ### Benchmarks ###
       - name: Install github-cli (Linux mariner)
         if: runner.os == 'Linux' && matrix.hypervisor == 'mshv'

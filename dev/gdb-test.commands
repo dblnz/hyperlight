@@ -1,0 +1,20 @@
+file src/tests/rust_guests/bin/debug/simpleguest
+target remote :8080
+
+set pagination off
+set logging file gdb.output
+set logging enabled on
+
+
+break hyperlight_main
+    commands
+    echo "Stopped at hyperlight_main breakpoint\n"
+    backtrace
+    continue
+end
+
+continue
+
+set logging enabled off
+quit
+
