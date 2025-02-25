@@ -132,6 +132,7 @@ pub enum DebugResponse {
     RemoveHwBreakpoint(bool),
     RemoveSwBreakpoint(bool),
     Step,
+    NotSupported,
     VcpuStopped(VcpuStopReason),
     WriteAddr,
     WriteRegisters,
