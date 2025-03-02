@@ -42,7 +42,7 @@ use mshv_bindings::{
     hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
     hv_partition_synthetic_processor_features,
 };
-use mshv_bindings2::{hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION, mshv_install_intercept};
+use mshv_bindings2::{hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION, hv_intercept_type_HV_INTERCEPT_TYPE_RESERVED0, mshv_install_intercept};
 use mshv_ioctls::{Mshv, VcpuFd, VmFd};
 use tracing::{instrument, Span};
 
@@ -147,6 +147,21 @@ mod debug {
                 .map_err(|e| new_error!("Could not set guest debug: {:?}", e))?;
 
             self.single_step = step;
+
+            let mut regs = vcpu_fd
+                .get_regs()
+                .map_err(|e| new_error!("Could not get registers: {:?}", e))?;
+
+            // Set TF Flag to enable Traps
+            if self.single_step {
+                regs.rflags |= 1 << 8;
+            } else {
+                regs.rflags &= !(1 << 8);
+            }
+
+            vcpu_fd
+                .set_regs(&regs)
+                .map_err(|e| new_error!("Could not set registers: {:?}", e))?;
 
             Ok(())
         }
@@ -587,7 +602,7 @@ pub(super) struct HypervLinuxDriver {
 }
 
 impl HypervLinuxDriver {
-    // pub const HV_INTERCEPT_ACCESS_MASK_EXECUTE: u32 = 0x04;
+    //pub const HV_INTERCEPT_ACCESS_MASK_EXECUTE: u32 = 0x04;
 
     /// Create a new `HypervLinuxDriver`, complete with all registers
     /// set up to execute a Hyperlight binary inside a HyperV-powered
@@ -641,12 +656,12 @@ impl HypervLinuxDriver {
 
         Self::setup_initial_sregs(&mut vcpu_fd, pml4_ptr.absolute()?)?;
 
-        // let mut interrupt = mshv_install_intercept::default();
-        // interrupt.access_type_mask = Self::HV_INTERCEPT_ACCESS_MASK_EXECUTE;
-        // interrupt.intercept_type = hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION;
+        //let mut interrupt = mshv_install_intercept::default();
+        //interrupt.access_type_mask = Self::HV_INTERCEPT_ACCESS_MASK_EXECUTE;
+        //interrupt.intercept_type = hv_intercept_type_HV_INTERCEPT_TYPE_EXCEPTION;
 
-        // TODO: Handle error
-        // vm_fd.install_intercept(interrupt)?;
+        // TODO(dblnz): Handle error
+        //vm_fd.install_intercept(interrupt)?;
 
         let ret = Self {
             _mshv: mshv,
@@ -907,6 +922,8 @@ impl Hypervisor for HypervLinuxDriver {
                 }
                 DEBUG => {
                     crate::debug!("Debug Details: {}", DEBUG);
+                    let dbg = self.vcpu_fd.get_debug_regs()?;
+                    crate::debug!("{:?}", dbg);
 
                     HyperlightExit::Debug(self.get_stop_reason()?)
                 }
