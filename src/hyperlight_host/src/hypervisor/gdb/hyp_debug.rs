@@ -44,7 +44,7 @@ pub trait GuestVcpuDebug {
     fn delete_hw_breakpoint(&mut self, addr: &u64);
 
     /// Get the reason the vCPU has stopped
-    fn get_stop_reason(&self, vcpu_fd: &Self::Vcpu, entrypoint: u64) -> Result<VcpuStopReason>;
+    fn get_stop_reason(&mut self, vcpu_fd: &Self::Vcpu, entrypoint: u64) -> Result<VcpuStopReason>;
     /// Read registers
     fn read_regs(&self, vcpu_fd: &Self::Vcpu, regs: &mut X86_64Regs) -> Result<()>;
     /// Enables or disables stepping and sets the vCPU debug configuration
@@ -325,7 +325,11 @@ pub mod kvm {
         }
 
         /// Get the reason the vCPU has stopped
-        fn get_stop_reason(&self, vcpu_fd: &Self::Vcpu, entrypoint: u64) -> Result<VcpuStopReason> {
+        fn get_stop_reason(
+            &mut self,
+            vcpu_fd: &Self::Vcpu,
+            entrypoint: u64,
+        ) -> Result<VcpuStopReason> {
             if self.single_step {
                 return Ok(VcpuStopReason::DoneStep);
             }
@@ -338,10 +342,13 @@ pub mod kvm {
             }
 
             if self.hw_breakpoints.contains(&gpa) {
-                return Ok(VcpuStopReason::HwBp);
-            }
-
-            if gpa == entrypoint {
+                // In case the hw breakpoint is the entry point, remove it to
+                // avoid hanging here as gdb does not remove breakpoints it
+                // has not set.
+                // Gdb expects the target to be stopped when connected.
+                if gpa == entrypoint {
+                    self.remove_hw_breakpoint(vcpu_fd, entrypoint)?;
+                }
                 return Ok(VcpuStopReason::HwBp);
             }
 
