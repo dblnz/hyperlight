@@ -40,6 +40,8 @@ use crate::mem::ptr::{GuestPtr, RawPtr};
 #[cfg(gdb)]
 use crate::HyperlightError;
 use crate::{log_then_return, new_error, Result};
+#[cfg(crashdump)]
+use super::gdb::X86_64Regs;
 
 /// Return `true` if the KVM API is available, version 12, and has UserMemory capability, or `false` otherwise
 #[instrument(skip_all, parent = Span::current(), level = "Trace")]
@@ -577,6 +579,35 @@ impl Hypervisor for KVMDriver {
     #[cfg(crashdump)]
     fn get_memory_regions(&self) -> &[MemoryRegion] {
         &self.mem_regions
+    }
+
+    #[cfg(crashdump)]
+    fn get_regs(&self) -> X86_64Regs {
+        let vcpu_regs = self.vcpu_fd.get_regs().unwrap();
+
+        let mut regs = X86_64Regs::default();
+
+        regs.rax = vcpu_regs.rax;
+        regs.rbx = vcpu_regs.rbx;
+        regs.rcx = vcpu_regs.rcx;
+        regs.rdx = vcpu_regs.rdx;
+        regs.rsi = vcpu_regs.rsi;
+        regs.rdi = vcpu_regs.rdi;
+        regs.rbp = vcpu_regs.rbp;
+        regs.rsp = vcpu_regs.rsp;
+        regs.r8 = vcpu_regs.r8;
+        regs.r9 = vcpu_regs.r9;
+        regs.r10 = vcpu_regs.r10;
+        regs.r11 = vcpu_regs.r11;
+        regs.r12 = vcpu_regs.r12;
+        regs.r13 = vcpu_regs.r13;
+        regs.r14 = vcpu_regs.r14;
+        regs.r15 = vcpu_regs.r15;
+
+        regs.rip = vcpu_regs.rip;
+        regs.rflags = vcpu_regs.rflags;
+
+        regs
     }
 
     #[cfg(gdb)]

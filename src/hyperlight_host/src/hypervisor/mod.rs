@@ -204,6 +204,11 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
     #[cfg(crashdump)]
     fn get_memory_regions(&self) -> &[MemoryRegion];
 
+    #[cfg(crashdump)]
+    fn get_regs(&self) -> gdb::X86_64Regs {
+        unimplemented!()
+    }
+
     #[cfg(gdb)]
     /// handles the cases when the vCPU stops due to a Debug event
     fn handle_debug(
