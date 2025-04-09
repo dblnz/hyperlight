@@ -125,6 +125,18 @@ pub(crate) struct X86_64Regs {
     pub(crate) rflags: u64,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct X86_64SRegs {
+    pub(crate) cs: u16,
+    pub(crate) ds: u16,
+    pub(crate) es: u16,
+    pub(crate) fs: u16,
+    pub(crate) fs_base: u64,
+    pub(crate) gs: u16,
+    pub(crate) gs_base: u64,
+    pub(crate) ss: u16,
+}
+
 /// Defines the possible reasons for which a vCPU can be stopped when debugging
 #[derive(Debug)]
 pub enum VcpuStopReason {

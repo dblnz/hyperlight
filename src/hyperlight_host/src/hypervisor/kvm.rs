@@ -41,7 +41,7 @@ use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::HyperlightError;
 use crate::{log_then_return, new_error, Result};
 #[cfg(crashdump)]
-use super::gdb::X86_64Regs;
+use super::gdb::{X86_64Regs, X86_64SRegs};
 
 /// Return `true` if the KVM API is available, version 12, and has UserMemory capability, or `false` otherwise
 #[instrument(skip_all, parent = Span::current(), level = "Trace")]
@@ -397,6 +397,25 @@ impl Debug for KVMDriver {
     }
 }
 
+macro_rules! segment {
+    ($desc:expr) => {
+        (($desc.limit as u64) & 0xFFFF).wrapping_shl(0)     | // Limit (0-15)
+        (($desc.base as u64) & 0xFFFF).wrapping_shl(16)     | // Base address (0-15)
+                                                              //
+        (($desc.base as u64) & 0xFF0000).wrapping_shl(32)   | // Base address (16-23)
+        (($desc.type_ as u64) & 0x07).wrapping_shl(40)      | // Type
+        (($desc.s as u64) & 0x01).wrapping_shl(44)          | // S
+        (($desc.dpl as u64) & 0x02).wrapping_shl(45)        | // DLP
+        (($desc.present as u64) & 0x01).wrapping_shl(47)    | // P
+        (($desc.limit as u64) & 0xF0000).wrapping_shl(51)   | // Limit (16-19)
+        (($desc.avl as u64) & 0x01).wrapping_shl(52)        | // AVL
+                                                              // Reserved 1 bit
+        (($desc.db as u64) & 0x01).wrapping_shl(54)         | // AVL
+        (($desc.g as u64) & 0x01).wrapping_shl(55)          | // G
+        (($desc.base as u64) & 0xFF000000).wrapping_shl(56)   // Base address (24-31)
+    };
+}
+
 impl Hypervisor for KVMDriver {
     /// Implementation of initialise for Hypervisor trait.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
@@ -608,6 +627,25 @@ impl Hypervisor for KVMDriver {
         regs.rflags = vcpu_regs.rflags;
 
         regs
+    }
+
+    #[cfg(crashdump)]
+    fn get_sregs(&self) -> X86_64SRegs {
+        let sregs = self.vcpu_fd.get_sregs().unwrap();
+
+        let mut ret = X86_64SRegs::default();
+
+        ret.cs = sregs.cs.selector;
+        ret.ss = sregs.ss.selector;
+        ret.fs = sregs.fs.selector;
+        ret.es = sregs.es.selector;
+        ret.ds = sregs.ds.selector;
+        ret.gs = sregs.gs.selector;
+
+        ret.gs_base = sregs.gs.base;
+        ret.fs_base = sregs.fs.base;
+
+        ret
     }
 
     #[cfg(gdb)]

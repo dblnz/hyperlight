@@ -716,6 +716,15 @@ fn add(function_call: &FunctionCall) -> Result<Vec<u8>> {
 
 #[no_mangle]
 pub extern "C" fn hyperlight_main() {
+    // Generate fault that triggers crashdump
+    unsafe { 
+        let a: *mut u32 = 0x20_0000 as *mut u32;
+        for i in 0..100 {
+            *a = 0;
+            print_output(&format!("test: {}\n", *a.sub(8*i)));
+        }
+    }
+
     let set_static_def = GuestFunctionDefinition::new(
         "SetStatic".to_string(),
         Vec::new(),

@@ -209,6 +209,11 @@ pub(crate) trait Hypervisor: Debug + Sync + Send {
         unimplemented!()
     }
 
+    #[cfg(crashdump)]
+    fn get_sregs(&self) -> gdb::X86_64SRegs {
+        unimplemented!()
+    }
+
     #[cfg(gdb)]
     /// handles the cases when the vCPU stops due to a Debug event
     fn handle_debug(

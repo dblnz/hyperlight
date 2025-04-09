@@ -2,7 +2,7 @@ use std::cmp::min;
 use std::io::Write;
 
 use super::gdb::X86_64Regs;
-use elfcore::{ArchState, CoreDumpBuilder, CoreError, ReadProcessMemory};
+use elfcore::{ArchState, CoreDumpBuilder, CoreError, Elf64_Auxv, ReadProcessMemory};
 use elfcore::{ProcessInformation, ThreadView, VaProtection, VaRegion};
 use elfcore::Pid;
 use tempfile::NamedTempFile;
@@ -53,13 +53,14 @@ pub(crate) fn crashdump_to_tempfile(hv: &dyn Hypervisor) -> Result<()> {
 struct GuestView {
     regions: Vec<VaRegion>,
     threads: Vec<ThreadView>,
+    aux_vector: Vec<elfcore::Elf64_Auxv>,
 }
 
 impl GuestView {
     fn new(hv: &dyn Hypervisor) -> Self {
         let regions = hv.get_memory_regions()
             .iter()
-            .filter(|r| r.host_region.start >= 0 && !r.host_region.is_empty())
+            .filter(|r| !r.host_region.is_empty())
             .map(|r| 
                 VaRegion {
                     begin: r.guest_region.start as u64,
@@ -77,71 +78,87 @@ impl GuestView {
             .collect();
 
         let regs = hv.get_regs();
+        let sregs = hv.get_sregs();
         let thread = ThreadView {
-            flags: 0,
-            tid: Pid::from_raw(0),
-            uid: 0,
-            gid: 0,
-            comm: "\0".to_string(),
-            ppid: 0,
-            pgrp: 0,
-            nice: 0,
-            state: 0,
-            utime: 0,
-            stime: 0,
-            cutime: 0,
-            cstime: 0,
-            cursig: 0,
-            session: 0,
-            sighold: 0,
-            sigpend: 0,
-            cmd_line: "\0".to_string(),
+            flags: 0,    // Kernel flags for the process
+            tid: Pid::from_raw(1),
+            uid: 0,      // User ID
+            gid: 0,      // Group ID
+            comm: "(simpleguest)\0".to_string(),
+            ppid: 0,     // Parent PID
+            pgrp: 0,     // Process group ID
+            nice: 0,     // Nice value
+            state: 0,    // Process state
+            utime: 0,    // User time
+            stime: 0,    // System time
+            cutime: 0,   // Children User time
+            cstime: 0,   // Children User time
+            cursig: 0,   // Current signal
+            session: 0,  // Session ID of the process
+            sighold: 0,  // Blocked signal
+            sigpend: 0,  // Pending signal
+            cmd_line: "hyperlight (simpleguest)\0".to_string(),
 
             arch_state: Box::new(ArchState {
                 gpr_state: vec![
-                    regs.r15,
-                    regs.r14,
-                    regs.r13,
-                    regs.r12,
-                    regs.rbp,
-                    regs.rbx,
-                    regs.r11,
-                    regs.r10,
-                    regs.r9,
-                    regs.r8,
-                    regs.rax,
-                    regs.rcx,
-                    regs.rdx,
-                    regs.rsi,
-                    regs.rdi,
+                    regs.r15,        // r15
+                    regs.r14,        // r14
+                    regs.r13,        // r13
+                    regs.r12,        // r12
+                    regs.rbp,        // rbp
+                    regs.rbx,        // rbx
+                    regs.r11,        // r11
+                    regs.r10,        // r10
+                    regs.r9,         // r9
+                    regs.r8,         // r8
+                    regs.rax,        // rax
+                    regs.rcx,        // rcx
+                    regs.rdx,        // rdx
+                    regs.rsi,        // rsi
+                    regs.rdi,        // rdi
                     0, // orig rax
-                    regs.rip,
-                    0, // cs
-                    regs.rflags,
-                    regs.rsp,
-                    0, // ss
-                    0, // fs_base
-                    0, // gs_base
-                    0, // ds
-                    0, // es
-                    0, // fs
-                    0, // gs
+                    regs.rip,        // rip
+                    sregs.cs as u64, // cs
+                    regs.rflags,     // eflags
+                    regs.rsp,        // rsp
+                    sregs.ss as u64, // ss
+                    sregs.fs_base,   // fs_base
+                    sregs.gs_base,   // gs_base
+                    sregs.ds as u64, // ds
+                    sregs.es as u64, // es
+                    sregs.fs as u64, // fs
+                    sregs.gs as u64, // gs
                 ],
                 components: vec![],
             }),
 
         };
 
+        let auxv = vec![
+            Elf64_Auxv {
+                a_type: 9, // AT_ENTRY
+                // Hardcoded value: 0x209000 - code offset
+                // TODO: Add a method to retrieve this offset
+                // NOTE: RIP is already offseted with this amount
+                a_val:  regs.rip - 0x209000,
+            }, 
+            Elf64_Auxv {
+                a_type: 0, // AT_NULL
+                a_val: 0,
+            },
+        ];
+
         Self {
             regions,
             threads: vec![thread],
+            aux_vector: auxv,
         }
     }
 }
 
 impl ProcessInformation for GuestView {
     fn get_pid(&self) -> Option<Pid> {
-        Some(Pid::from_raw(0))
+        Some(Pid::from_raw(1))
     }
     fn get_threads(&self) -> Option<&[elfcore::ThreadView]> {
         Some(&self.threads)
@@ -150,7 +167,7 @@ impl ProcessInformation for GuestView {
         0x1000
     }
     fn get_aux_vector(&self) -> Option<&[elfcore::Elf64_Auxv]> {
-        None
+        Some(&self.aux_vector)
     }
     fn get_va_regions(&self) -> &[elfcore::VaRegion] {
         &self.regions

@@ -655,6 +655,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 [[package]]
 name = "elfcore"
 version = "1.1.5"
+source = "git+https://github.com/dblnz/elfcore.git?branch=split-linux-impl-from-elfcore#bf07540ea75efcfd3eb5091c40a45d4590adf208"
 dependencies = [
  "libc",
  "nix 0.26.4",
