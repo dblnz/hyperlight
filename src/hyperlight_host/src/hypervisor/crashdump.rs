@@ -22,6 +22,8 @@ pub(crate) struct CrashDumpContext<'a> {
     regs: [u64; 27],
     xsave: Vec<u8>,
     entry: u64,
+    binary: Option<String>,
+    filename: Option<String>,
 }
 
 impl<'a> CrashDumpContext<'a> {
@@ -30,12 +32,16 @@ impl<'a> CrashDumpContext<'a> {
         regs: [u64; 27],
         xsave: Vec<u8>,
         entry: u64,
+        binary: Option<String>,
+        filename: Option<String>,
     ) -> Self {
         Self {
             regions,
             regs,
             xsave,
             entry,
+            binary,
+            filename,
         }
     }
 }
@@ -69,6 +75,21 @@ impl GuestView {
             })
             .collect();
 
+        let filename = if let Some(mut binary) = ctx.filename.clone() {
+            binary.push('\0');
+
+            binary
+        } else {
+            "\0".to_string()
+        };
+
+        let cmd = if let Some(mut binary) = ctx.binary.clone() {
+            binary.push('\0');
+            binary
+        } else {
+            "\0".to_string()
+        };
+
         // The xsave state is checked as it can be empty
         let mut components = vec![];
         if !ctx.xsave.is_empty() {
@@ -88,7 +109,7 @@ impl GuestView {
             tid: 1,
             uid: 0, // User ID
             gid: 0, // Group ID
-            comm: "\0".to_string(),
+            comm: filename,
             ppid: 0,    // Parent PID
             pgrp: 0,    // Process group ID
             nice: 0,    // Nice value
@@ -101,7 +122,7 @@ impl GuestView {
             session: 0, // Session ID of the process
             sighold: 0, // Blocked signal
             sigpend: 0, // Pending signal
-            cmd_line: "\0".to_string(),
+            cmd_line: cmd,
 
             arch_state: Box::new(ArchState {
                 gpr_state: ctx.regs.to_vec(),
