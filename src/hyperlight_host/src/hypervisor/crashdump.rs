@@ -14,6 +14,8 @@ const NT_X86_XSTATE: u32 = 0x202;
 const AT_ENTRY: u64 = 9;
 const AT_NULL: u64 = 0;
 
+/// Structure to hold the crash dump context
+/// This structure contains the information needed to create a core dump
 #[derive(Debug)]
 pub(crate) struct CrashDumpContext<'a> {
     regions: &'a [MemoryRegion],
@@ -38,6 +40,8 @@ impl<'a> CrashDumpContext<'a> {
     }
 }
 
+/// Structure that contains the process information for the core dump
+/// This serves as a source of information for `elfcore`'s [`CoreDumpBuilder`]
 struct GuestView {
     regions: Vec<VaRegion>,
     threads: Vec<ThreadView>,
@@ -46,6 +50,7 @@ struct GuestView {
 
 impl GuestView {
     fn new(ctx: &CrashDumpContext) -> Self {
+        // Map the regions to the format `CoreDumpBuilder` expects
         let regions = ctx
             .regions
             .iter()
@@ -64,6 +69,7 @@ impl GuestView {
             })
             .collect();
 
+        // The xsave state is checked as it can be empty
         let mut components = vec![];
         if !ctx.xsave.is_empty() {
             components.push(ArchComponentState {
@@ -73,6 +79,10 @@ impl GuestView {
                 data: ctx.xsave.clone(),
             });
         }
+
+        // Create the thread view
+        // The thread view contains the information about the thread
+        // NOTE: Some of these fields are not used in the current implementation
         let thread = ThreadView {
             flags: 0, // Kernel flags for the process
             tid: 1,
@@ -145,6 +155,9 @@ impl ProcessInfoSource for GuestView {
     }
 }
 
+/// Structure that reads the guest memory
+/// This structure serves as a custom memory reader for `elfcore`'s
+/// [`CoreDumpBuilder`]
 struct GuestMemReader {
     regions: Vec<MemoryRegion>,
 }
@@ -164,6 +177,7 @@ impl ReadProcessMemory for GuestMemReader {
         buf: &mut [u8],
     ) -> std::result::Result<usize, CoreError> {
         for r in self.regions.iter() {
+            // Check if the base address is within the guest region
             if base >= r.guest_region.start && base < r.guest_region.end {
                 let offset = base - r.guest_region.start;
                 let region_slice = unsafe {
@@ -181,6 +195,8 @@ impl ReadProcessMemory for GuestMemReader {
 
                 // Only copy the amount that fits in both buffers
                 buf[..copy_size].copy_from_slice(&region_slice[offset..offset + copy_size]);
+
+                // Return the number of bytes copied
                 return std::result::Result::Ok(copy_size);
             }
         }
@@ -227,13 +243,13 @@ pub(crate) fn crashdump_to_tempfile(hv: &dyn Hypervisor) -> Result<()> {
         .write(&temp_file)
         .map_err(|e| new_error!("Failed to write core dump: {:?}", e))?;
 
-    // Persist the file with a .dmp extension
-    let persist_path = temp_file.path().with_extension("dmp");
+    let persist_path = temp_file.path().with_extension("elf");
     temp_file
         .persist(&persist_path)
         .map_err(|e| new_error!("Failed to persist core dump file: {:?}", e))?;
 
     let path_string = persist_path.to_string_lossy().to_string();
+
     println!("Core dump created successfully: {}", path_string);
     log::error!("Core dump file: {}", path_string);
 

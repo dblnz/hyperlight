@@ -591,6 +591,7 @@ impl Hypervisor for KVMDriver {
         let sregs = self.vcpu_fd.get_sregs()?;
         let xsave = self.vcpu_fd.get_xsave()?;
 
+        // Set the registers in the order expected by the crashdump context
         regs[0] = vcpu_regs.r15; // r15
         regs[1] = vcpu_regs.r14; // r14
         regs[2] = vcpu_regs.r13; // r13
@@ -619,6 +620,8 @@ impl Hypervisor for KVMDriver {
         regs[25] = sregs.fs.selector as u64; // fs
         regs[26] = sregs.gs.selector as u64; // gs
 
+        // The [`CrashDumpContext`] accepts xsave as a vector of u8, so we need to convert the
+        // xsave region to a vector of u8
         Ok(crashdump::CrashDumpContext::new(
             &self.mem_regions,
             regs,

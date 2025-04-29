@@ -496,6 +496,7 @@ impl Hypervisor for HypervWindowsDriver {
         let sregs = self.processor.get_sregs()?;
         let xsave = self.processor.get_xsave()?;
 
+        // Set the registers in the order expected by the crashdump context
         regs[0] = vcpu_regs.r15; // r15
         regs[1] = vcpu_regs.r14; // r14
         regs[2] = vcpu_regs.r13; // r13

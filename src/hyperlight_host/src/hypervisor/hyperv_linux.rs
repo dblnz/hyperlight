@@ -667,6 +667,7 @@ impl Hypervisor for HypervLinuxDriver {
         let sregs = self.vcpu_fd.get_sregs()?;
         let xsave = self.vcpu_fd.get_xsave()?;
 
+        // Set up the registers for the crash dump
         regs[0] = vcpu_regs.r15; // r15
         regs[1] = vcpu_regs.r14; // r14
         regs[2] = vcpu_regs.r13; // r13
