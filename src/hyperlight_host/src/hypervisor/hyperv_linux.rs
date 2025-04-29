@@ -701,6 +701,7 @@ impl Hypervisor for HypervLinuxDriver {
         regs[25] = sregs.fs.selector as u64; // fs
         regs[26] = sregs.gs.selector as u64; // gs
 
+        // Get the filename from the binary path
         let filename = self.metadata.binary_path.clone().map(|path| {
             Path::new(&path)
                 .file_name()

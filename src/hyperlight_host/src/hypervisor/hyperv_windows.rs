@@ -531,6 +531,7 @@ impl Hypervisor for HypervWindowsDriver {
         regs[25] = unsafe { sregs.fs.Segment.Selector } as u64; // fs
         regs[26] = unsafe { sregs.gs.Segment.Selector } as u64; // gs
 
+        // Get the filename from the metadata
         let filename = self.metadata.binary_path.clone().map(|path| {
             Path::new(&path)
                 .file_name()

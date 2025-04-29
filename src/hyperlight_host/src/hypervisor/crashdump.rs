@@ -75,6 +75,7 @@ impl GuestView {
             })
             .collect();
 
+        // The filename and command line are set to null-terminated strings
         let filename = if let Some(mut binary) = ctx.filename.clone() {
             binary.push('\0');
 
