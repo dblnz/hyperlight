@@ -23,6 +23,7 @@ use hyperlight_guest::exit::abort_with_code_and_message;
 
 /// Exception handler
 #[unsafe(no_mangle)]
+#[hyperlight_guest_tracing_macro::trace_function]
 pub extern "C" fn hl_exception_handler(
     stack_pointer: u64,
     exception_number: u64,
