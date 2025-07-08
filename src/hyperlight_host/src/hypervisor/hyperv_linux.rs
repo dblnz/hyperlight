@@ -48,7 +48,7 @@ use mshv_bindings::{
     hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
     hv_partition_synthetic_processor_features,
 };
-#[cfg(feature = "unwind_guest")]
+#[cfg(feature = "trace_guest")]
 use mshv_bindings::{
     hv_register_name, hv_register_name_HV_X64_REGISTER_RAX, hv_register_name_HV_X64_REGISTER_RBP,
     hv_register_name_HV_X64_REGISTER_RCX, hv_register_name_HV_X64_REGISTER_RSP,
@@ -58,7 +58,7 @@ use tracing::{Span, instrument};
 #[cfg(crashdump)]
 use {super::crashdump, std::path::Path};
 
-#[cfg(feature = "unwind_guest")]
+#[cfg(feature = "trace_guest")]
 use super::TraceRegister;
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
@@ -530,7 +530,7 @@ impl Debug for HypervLinuxDriver {
     }
 }
 
-#[cfg(feature = "unwind_guest")]
+#[cfg(feature = "trace_guest")]
 impl From<TraceRegister> for hv_register_name {
     fn from(r: TraceRegister) -> Self {
         match r {
@@ -1055,7 +1055,7 @@ impl Hypervisor for HypervLinuxDriver {
         Ok(())
     }
 
-    #[cfg(feature = "unwind_guest")]
+    #[cfg(feature = "trace_guest")]
     fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64> {
         let mut assoc = [hv_register_assoc {
             name: reg.into(),
@@ -1069,6 +1069,10 @@ impl Hypervisor for HypervLinuxDriver {
     #[cfg(feature = "trace_guest")]
     fn trace_info_as_ref(&self) -> &TraceInfo {
         &self.trace_info
+    }
+    #[cfg(feature = "trace_guest")]
+    fn trace_info_as_mut(&mut self) -> &mut TraceInfo {
+        &mut self.trace_info
     }
 }
 

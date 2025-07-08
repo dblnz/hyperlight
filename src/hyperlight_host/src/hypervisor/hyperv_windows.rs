@@ -43,7 +43,7 @@ use {
     std::sync::Mutex,
 };
 
-#[cfg(feature = "unwind_guest")]
+#[cfg(feature = "trace_guest")]
 use super::TraceRegister;
 use super::fpu::{FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 use super::handlers::{MemAccessHandlerWrapper, OutBHandlerWrapper};
@@ -1037,7 +1037,7 @@ impl Hypervisor for HypervWindowsDriver {
         Ok(())
     }
 
-    #[cfg(feature = "unwind_guest")]
+    #[cfg(feature = "trace_guest")]
     fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64> {
         let register_names = [WHV_REGISTER_NAME::from(reg)];
         let mut register_values: [WHV_REGISTER_VALUE; 1] = Default::default();
@@ -1057,6 +1057,10 @@ impl Hypervisor for HypervWindowsDriver {
     #[cfg(feature = "trace_guest")]
     fn trace_info_as_ref(&self) -> &TraceInfo {
         &self.trace_info
+    }
+    #[cfg(feature = "trace_guest")]
+    fn trace_info_as_mut(&mut self) -> &mut TraceInfo {
+        &mut self.trace_info
     }
 }
 
