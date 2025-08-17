@@ -14,16 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(feature = "trace_guest")]
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
 use hyperlight_common::outb::{Exception, OutBAction};
-#[cfg(feature = "trace_guest")]
-use hyperlight_guest_tracing::TraceRecord;
 use log::{Level, Record};
 use tracing::{Span, instrument};
 use tracing_log::format_trace;
@@ -32,8 +28,6 @@ use super::host_funcs::FunctionRegistry;
 use super::mem_mgr::MemMgrWrapper;
 #[cfg(feature = "trace_guest")]
 use crate::hypervisor::Hypervisor;
-#[cfg(feature = "trace_guest")]
-use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::{HyperlightError, Result, new_error};
@@ -190,96 +184,17 @@ pub(crate) fn handle_outb(
         #[cfg(feature = "mem_profile")]
         OutBAction::TraceMemoryAlloc => {
             let regs = _hv.read_regs()?;
-            let Ok(stack) =
-                crate::sandbox::trace::unwind(&regs, mem_mgr.as_ref(), _hv.trace_info_as_ref())
-            else {
-                return Ok(());
-            };
-            let amt = regs.rax;
-            let ptr = regs.rcx;
-
-            crate::sandbox::trace::record_trace_frame(_hv.trace_info_as_ref(), 2u64, |f| {
-                let _ = f.write_all(&ptr.to_ne_bytes());
-                let _ = f.write_all(&amt.to_ne_bytes());
-                crate::sandbox::trace::write_stack(f, &stack);
-            })
+            crate::sandbox::trace::handle_trace_memory_alloc(&regs, mem_mgr, _hv.trace_info_mut())
         }
         #[cfg(feature = "mem_profile")]
         OutBAction::TraceMemoryFree => {
             let regs = _hv.read_regs()?;
-            let Ok(stack) =
-                crate::sandbox::trace::unwind(&regs, mem_mgr.as_ref(), _hv.trace_info_as_ref())
-            else {
-                return Ok(());
-            };
-            let ptr = regs.rcx;
-
-            crate::sandbox::trace::record_trace_frame(_hv.trace_info_as_ref(), 3u64, |f| {
-                let _ = f.write_all(&ptr.to_ne_bytes());
-                crate::sandbox::trace::write_stack(f, &stack);
-            })
+            crate::sandbox::trace::handle_trace_memory_free(&regs, mem_mgr, _hv.trace_info_mut())
         }
         #[cfg(feature = "trace_guest")]
         OutBAction::TraceRecord => {
             let regs = _hv.read_regs()?;
-            let len = regs.rax;
-            let ptr = regs.rcx;
-
-            let mut buffer = vec![0u8; len as usize * std::mem::size_of::<TraceRecord>()];
-            let buffer = &mut buffer[..];
-
-            // Read the trace records from the guest memory
-            mem_mgr
-                .as_ref()
-                .shared_mem
-                .copy_to_slice(buffer, ptr as usize - SandboxMemoryLayout::BASE_ADDRESS)
-                .map_err(|e| {
-                    new_error!(
-                        "Failed to copy trace records from guest memory to host: {:?}",
-                        e
-                    )
-                })?;
-
-            let traces = unsafe {
-                std::slice::from_raw_parts(buffer.as_ptr() as *const TraceRecord, len as usize)
-            };
-
-            {
-                let trace_info = _hv.trace_info_as_mut();
-
-                // Calculate the TSC frequency based on the current TSC reading
-                // This is done only once, when the first trace record is received
-                // Ideally, we should use a timer or a clock to measure the time elapsed,
-                // but that adds delays.
-                // To avoid that we store the TSC value and a timestamp right
-                // before starting the guest execution and then calculate the TSC frequency when
-                // the first trace record is received, based on the current TSC value and clock.
-                if trace_info.tsc_freq.is_none() {
-                    trace_info.calculate_tsc_freq()?;
-
-                    // After the TSC frequency is calculated, we no longer need the value of TSC
-                    // recorded on the host when the guest started, so we can set the guest_start_tsc field
-                    // to store the TSC value recorded on the guest when the guest started executing.
-                    // This is used to calculate the records timestamps relative to the first trace record.
-                    if !traces.is_empty() {
-                        trace_info.guest_start_tsc = Some(traces[0].cycles);
-                    }
-                }
-            }
-
-            for record in traces {
-                crate::sandbox::trace::record_guest_trace_frame(
-                    _hv.trace_info_as_ref(),
-                    4u64,
-                    record.cycles,
-                    |f| {
-                        let _ = f.write_all(&record.msg_len.to_ne_bytes());
-                        let _ = f.write_all(&record.msg[..record.msg_len]);
-                    },
-                )?
-            }
-
-            Ok(())
+            crate::sandbox::trace::handle_trace_record(&regs, mem_mgr, _hv.trace_info_mut())
         }
     }
 }

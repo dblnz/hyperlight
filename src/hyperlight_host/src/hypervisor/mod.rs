@@ -236,12 +236,9 @@ pub(crate) trait Hypervisor: Debug + Send {
     #[cfg(feature = "trace_guest")]
     fn read_regs(&self) -> Result<arch::X86_64Regs>;
 
-    /// Get a reference of the trace info for the guest
-    #[cfg(feature = "trace_guest")]
-    fn trace_info_as_ref(&self) -> &TraceInfo;
     /// Get a mutable reference of the trace info for the guest
     #[cfg(feature = "trace_guest")]
-    fn trace_info_as_mut(&mut self) -> &mut TraceInfo;
+    fn trace_info_mut(&mut self) -> &mut TraceInfo;
 }
 
 /// Returns a Some(HyperlightExit::AccessViolation(..)) if the given gpa doesn't have
