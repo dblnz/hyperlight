@@ -45,7 +45,7 @@ mod callable;
 
 #[cfg(feature = "unwind_guest")]
 use std::io::Write;
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use std::sync::{Arc, Mutex};
 
 /// Trait used by the macros to paper over the differences between hyperlight and hyperlight-wasm
@@ -96,7 +96,7 @@ pub fn is_hypervisor_present() -> bool {
     hypervisor::get_available_hypervisor().is_some()
 }
 
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 #[derive(Clone)]
 /// The information that trace collection requires in order to write
 /// an accurate trace.
@@ -135,7 +135,7 @@ pub(crate) struct TraceInfo {
     #[cfg(feature = "unwind_guest")]
     pub unwind_cache: Arc<Mutex<framehop::x86_64::CacheX86_64>>,
 }
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 impl TraceInfo {
     /// Create a new TraceInfo by saving the current time as the epoch
     /// and generating a random filename.

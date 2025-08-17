@@ -35,7 +35,7 @@ use crate::mem::ptr_offset::Offset;
 use crate::mem::shared_mem::GuestSharedMemory;
 #[cfg(any(feature = "init-paging", target_os = "windows"))]
 use crate::mem::shared_mem::SharedMemory;
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use crate::sandbox::TraceInfo;
 #[cfg(gdb)]
 use crate::sandbox::config::DebugInfo;
@@ -198,7 +198,7 @@ pub(crate) fn set_up_hypervisor_partition(
         None
     };
 
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     let trace_info = TraceInfo::new(
         #[cfg(feature = "unwind_guest")]
         _load_info,
@@ -217,7 +217,7 @@ pub(crate) fn set_up_hypervisor_partition(
                 gdb_conn,
                 #[cfg(crashdump)]
                 rt_cfg.clone(),
-                #[cfg(feature = "trace_guest")]
+                #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
                 trace_info,
             )?;
             Ok(Box::new(hv))
@@ -235,7 +235,7 @@ pub(crate) fn set_up_hypervisor_partition(
                 gdb_conn,
                 #[cfg(crashdump)]
                 rt_cfg.clone(),
-                #[cfg(feature = "trace_guest")]
+                #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
                 trace_info,
             )?;
             Ok(Box::new(hv))
@@ -259,7 +259,7 @@ pub(crate) fn set_up_hypervisor_partition(
                 gdb_conn,
                 #[cfg(crashdump)]
                 rt_cfg.clone(),
-                #[cfg(feature = "trace_guest")]
+                #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
                 trace_info,
             )?;
             Ok(Box::new(hv))

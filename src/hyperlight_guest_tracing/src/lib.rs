@@ -103,6 +103,10 @@ limitations under the License.
 /// hyperlight_guest_tracing_macro::flush!();
 /// ```
 pub use hyperlight_guest_tracing_macro::*;
+#[cfg(feature = "std_trace")]
+pub use std_trace::{
+    Events, GuestEvent, GuestSpan, Spans, Stack, TraceBatchInfo, init_guest_tracing, send_to_host,
+};
 #[cfg(feature = "trace")]
 pub use trace::{create_trace_record, flush_trace_buffer};
 
@@ -151,6 +155,363 @@ pub mod invariant_tsc {
     /// However, the resulting timestamp is only meaningful if invariant TSC is supported.
     pub fn read_tsc() -> u64 {
         unsafe { _rdtsc() }
+    }
+}
+
+#[cfg(feature = "std_trace")]
+mod std_trace {
+    extern crate alloc;
+    use alloc::sync::{Arc, Weak};
+    use core::fmt::Debug;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    use heapless as hl;
+    use hyperlight_common::outb::OutBAction;
+    use spin::Mutex;
+    use tracing_core::field::{Field, Visit};
+    use tracing_core::span::{Attributes, Id, Record};
+    use tracing_core::subscriber::Subscriber;
+    use tracing_core::{Event, Metadata};
+
+    use crate::invariant_tsc;
+
+    const MAX_NO_OF_SPANS: usize = 10;
+    const MAX_NO_OF_EVENTS: usize = 32;
+    const MAX_NAME_LENGTH: usize = 32;
+    const MAX_TARGET_LENGTH: usize = 32;
+    const MAX_FIELD_LENGTH: usize = 16;
+    const MAX_NO_OF_FIELDS: usize = 8;
+
+    pub type Spans = hl::Vec<
+        GuestSpan<MAX_NAME_LENGTH, MAX_TARGET_LENGTH, MAX_FIELD_LENGTH, MAX_NO_OF_FIELDS>,
+        MAX_NO_OF_SPANS,
+    >;
+    pub type Events =
+        hl::Vec<GuestEvent<MAX_NAME_LENGTH, MAX_FIELD_LENGTH, MAX_NO_OF_FIELDS>, MAX_NO_OF_EVENTS>;
+    pub type Stack = hl::Vec<u64, MAX_NO_OF_SPANS>;
+
+    /// Weak reference to the guest state so we can manually trigger export to host
+    static GUEST_STATE: spin::Once<Weak<GuestState>> = spin::Once::new();
+
+    /// Helper type
+    pub type GuestState = TraceState<
+        MAX_NO_OF_SPANS,
+        MAX_NO_OF_EVENTS,
+        MAX_NAME_LENGTH,
+        MAX_TARGET_LENGTH,
+        MAX_FIELD_LENGTH,
+        MAX_NO_OF_FIELDS,
+    >;
+
+    pub struct TraceState<
+        const SP: usize,
+        const EV: usize,
+        const N: usize,
+        const T: usize,
+        const FS: usize,
+        const F: usize,
+    > {
+        next_id: AtomicU64,
+        spans: Mutex<hl::Vec<GuestSpan<N, T, FS, F>, SP>>,
+        events: Mutex<hl::Vec<GuestEvent<N, FS, F>, EV>>,
+        stack: Mutex<hl::Vec<u64, SP>>,
+    }
+
+    impl<
+        const SP: usize,
+        const EV: usize,
+        const N: usize,
+        const T: usize,
+        const FS: usize,
+        const F: usize,
+    > TraceState<SP, EV, N, T, FS, F>
+    {
+        fn new() -> Self {
+            Self {
+                next_id: AtomicU64::new(1),
+                spans: Mutex::new(hl::Vec::new()),
+                events: Mutex::new(hl::Vec::new()),
+                stack: Mutex::new(hl::Vec::new()),
+            }
+        }
+
+        fn alloc_id(&self) -> (u64, Id) {
+            let n = self.next_id.load(Ordering::Relaxed);
+            self.next_id.store(n + 1, Ordering::Relaxed);
+
+            (n, Id::from_u64(n))
+        }
+
+        fn export(&self) -> TraceBatchInfo {
+            TraceBatchInfo {
+                spans_ptr: self.spans.lock().as_ptr() as u64,
+                events_ptr: self.events.lock().as_ptr() as u64,
+                stack_ptr: self.stack.lock().as_ptr() as u64,
+            }
+        }
+
+        pub fn new_span(&self, attrs: &Attributes) -> Id {
+            let (idn, id) = self.alloc_id();
+
+            let md = attrs.metadata();
+            let mut name = hl::String::<N>::new();
+            let mut target = hl::String::<T>::new();
+            let _ = name.push_str(&md.name());
+            let _ = target.push_str(&md.target());
+
+            let mut fields = hl::Vec::new();
+            attrs.record(&mut FieldsVisitor::<FS, F> { out: &mut fields });
+
+            // Find parent from current stack top (if any)
+            let parent_id = self.stack.lock().last().copied();
+
+            let span = GuestSpan::<N, T, FS, F> {
+                id: idn,
+                parent_id,
+                level: (*md.level()).into(),
+                name,
+                target,
+                start_tsc: invariant_tsc::read_tsc(),
+                end_tsc: None,
+                fields,
+            };
+
+            let mut spans = self.spans.lock();
+            let _ = spans.push(span);
+
+            // In case the spans Vec is full, we need to report them to the host
+            if spans.len() == spans.capacity() {
+                let tbi = self.export();
+                exit_to_host(tbi);
+            }
+
+            id
+        }
+
+        pub fn event(&self, event: &Event<'_>) {
+            let stack = self.stack.lock();
+            let parent_id = stack.last().copied().unwrap_or(0);
+
+            let md = event.metadata();
+            let mut name = hl::String::<N>::new();
+            // Treat error when name is bigger than the space allocated
+            let _ = name.push_str(md.name());
+
+            let mut fields = hl::Vec::new();
+            event.record(&mut FieldsVisitor { out: &mut fields });
+
+            let ev = GuestEvent {
+                level: (*md.level()).into(),
+                parent_id,
+                name,
+                tsc: invariant_tsc::read_tsc(),
+                fields,
+            };
+
+            let mut events = self.events.lock();
+            let _ = events.push(ev);
+            // Flush buffer to host if full
+            if events.len() >= events.capacity() {
+                let tbi = self.export();
+                exit_to_host(tbi);
+            }
+        }
+
+        fn record(&self, id: &Id, values: &Record<'_>) {
+            let mut spans = self.spans.lock();
+            if let Some(s) = spans.iter_mut().find(|s| s.id == id.into_u64()) {
+                let mut v = hl::Vec::new();
+                values.record(&mut FieldsVisitor::<FS, F> { out: &mut v });
+                s.fields.extend(v);
+            }
+        }
+
+        fn enter(&self, id: &Id) {
+            let mut st = self.stack.lock();
+            let _ = st.push(id.into_u64());
+        }
+
+        fn exit(&self, _id: &Id) {
+            let mut st = self.stack.lock();
+            let _ = st.pop();
+        }
+
+        fn try_close(&self, id: Id) -> bool {
+            let mut spans = self.spans.lock();
+            if let Some(s) = spans.iter_mut().find(|s| s.id == id.into_u64()) {
+                s.end_tsc = Some(invariant_tsc::read_tsc());
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// This structure is used to exchange data between the guest and host
+    pub struct TraceBatchInfo {
+        spans_ptr: u64,
+        events_ptr: u64,
+        stack_ptr: u64,
+    }
+
+    pub enum TraceLevel {
+        Error,
+        Warn,
+        Info,
+        Debug,
+        Trace,
+    }
+
+    impl From<tracing::Level> for TraceLevel {
+        fn from(value: tracing::Level) -> Self {
+            match value {
+                tracing::Level::ERROR => Self::Error,
+                tracing::Level::WARN => Self::Warn,
+                tracing::Level::INFO => Self::Info,
+                tracing::Level::DEBUG => Self::Debug,
+                tracing::Level::TRACE => Self::Trace,
+            }
+        }
+    }
+    impl Into<tracing::Level> for TraceLevel {
+        fn into(self) -> tracing::Level {
+            match self {
+                Self::Error => tracing::Level::ERROR,
+                Self::Warn => tracing::Level::WARN,
+                Self::Info => tracing::Level::INFO,
+                Self::Debug => tracing::Level::DEBUG,
+                Self::Trace => tracing::Level::TRACE,
+            }
+        }
+    }
+
+    pub struct GuestSpan<const N: usize, const T: usize, const FS: usize, const F: usize> {
+        id: u64,
+        parent_id: Option<u64>,
+        level: TraceLevel,
+        /// Span name
+        name: hl::String<N>,
+        /// Filename
+        target: hl::String<T>,
+        start_tsc: u64,
+        end_tsc: Option<u64>,
+        fields: hl::Vec<(hl::String<FS>, hl::String<FS>), F>,
+    }
+
+    pub struct GuestEvent<const N: usize, const FS: usize, const F: usize> {
+        level: TraceLevel,
+        parent_id: u64,
+        name: hl::String<N>,
+        /// Event name
+        tsc: u64,
+        fields: hl::Vec<(hl::String<FS>, hl::String<FS>), F>,
+    }
+
+    struct FieldsVisitor<'a, const FS: usize, const F: usize> {
+        out: &'a mut hl::Vec<(hl::String<FS>, hl::String<FS>), F>,
+    }
+
+    impl<'a, const FS: usize, const F: usize> Visit for FieldsVisitor<'a, FS, F> {
+        fn record_str(&mut self, f: &Field, v: &str) {
+            let mut k = heapless::String::<FS>::new();
+            let mut val = heapless::String::<FS>::new();
+            let _ = k.push_str(f.name());
+            let _ = val.push_str(v);
+            let _ = self.out.push((k, val));
+        }
+        fn record_debug(&mut self, f: &Field, v: &dyn Debug) {
+            use heapless::String;
+            let mut k = String::<FS>::new();
+            let mut val = String::<FS>::new();
+            let _ = k.push_str(f.name());
+            let _ = val.push_str(&alloc::format!("{v:?}"));
+            let _ = self.out.push((k, val));
+        }
+    }
+
+    /// This structure holds the tracing state of the guest
+    struct GuestSubscriber {
+        state: Arc<GuestState>,
+    }
+
+    impl GuestSubscriber {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(GuestState::new()),
+            }
+        }
+        fn state(&self) -> &Arc<GuestState> {
+            &self.state
+        }
+    }
+
+    impl Subscriber for GuestSubscriber {
+        fn enabled(&self, _md: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, attrs: &Attributes<'_>) -> Id {
+            self.state.new_span(attrs)
+        }
+
+        fn record(&self, id: &Id, values: &Record<'_>) {
+            self.state.record(id, values)
+        }
+
+        fn event(&self, event: &Event<'_>) {
+            self.state.event(event)
+        }
+
+        fn enter(&self, id: &Id) {
+            self.state.enter(id)
+        }
+
+        fn exit(&self, id: &Id) {
+            self.state.exit(id)
+        }
+
+        fn try_close(&self, id: Id) -> bool {
+            self.state.try_close(id)
+        }
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {
+            // no-op: we don't track follows-from relationships
+        }
+    }
+
+    /// Initialize the guest tracing subscriber as global default.
+    pub fn init_guest_tracing() {
+        // Set as global default if not already set.
+        if tracing_core::dispatcher::has_been_set() {
+            return;
+        }
+        let sub = GuestSubscriber::new();
+        let state = sub.state();
+        // Store state Weak<GuestState> to use later at runtime
+        GUEST_STATE.call_once(|| Arc::downgrade(state));
+
+        // Set global dispatcher
+        let _ = tracing_core::dispatcher::set_global_default(tracing_core::Dispatch::new(sub));
+    }
+
+    fn exit_to_host(tbi: TraceBatchInfo) {
+        unsafe {
+            core::arch::asm!("out dx, al",
+                in("dx") OutBAction::TraceBatch as u16,
+                in("r8") OutBAction::TraceBatch as u64,
+                in("r9") tbi.spans_ptr,
+                in("r10") tbi.events_ptr,
+                in("r11") tbi.stack_ptr,
+            );
+        }
+    }
+
+    pub fn send_to_host() {
+        if let Some(w) = GUEST_STATE.get() {
+            if let Some(state) = w.upgrade() {
+                exit_to_host(state.export())
+            }
+        }
     }
 }
 

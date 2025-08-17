@@ -20,3 +20,4 @@ hyperlight-guest-tracing = { workspace = true, default-features = false }
 [features]
 default = []
 trace_guest = ["hyperlight-guest-tracing/trace"]
+std_trace_guest = ["hyperlight-guest-tracing/std_trace"]

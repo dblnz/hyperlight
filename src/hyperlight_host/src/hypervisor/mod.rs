@@ -20,7 +20,7 @@ use tracing::{Span, instrument};
 use crate::error::HyperlightError::ExecutionCanceledByHost;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::metrics::METRIC_GUEST_CANCELLATION;
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use crate::sandbox::TraceInfo;
 use crate::{HyperlightError, Result, log_then_return};
 
@@ -121,7 +121,7 @@ pub enum HyperlightExit {
 }
 
 /// Registers which may be useful for tracing/stack unwinding
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 pub enum TraceRegister {
     /// RAX
     RAX,
@@ -250,14 +250,14 @@ pub(crate) trait Hypervisor: Debug + Send {
     fn check_stack_guard(&self) -> Result<bool>;
 
     /// Read a register for trace/unwind purposes
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64>;
 
     /// Get a reference of the trace info for the guest
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     fn trace_info_as_ref(&self) -> &TraceInfo;
     /// Get a mutable reference of the trace info for the guest
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     fn trace_info_as_mut(&mut self) -> &mut TraceInfo;
 }
 

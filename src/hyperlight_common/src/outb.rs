@@ -107,6 +107,8 @@ pub enum OutBAction {
     TraceMemoryFree = 106,
     #[cfg(feature = "trace_guest")]
     TraceRecord = 107,
+    #[cfg(feature = "std_trace_guest")]
+    TraceBatch = 108,
 }
 
 impl TryFrom<u16> for OutBAction {
@@ -125,6 +127,8 @@ impl TryFrom<u16> for OutBAction {
             106 => Ok(OutBAction::TraceMemoryFree),
             #[cfg(feature = "trace_guest")]
             107 => Ok(OutBAction::TraceRecord),
+            #[cfg(feature = "std_trace_guest")]
+            108 => Ok(OutBAction::TraceBatch),
             _ => Err(anyhow::anyhow!("Invalid OutBAction value: {}", val)),
         }
     }

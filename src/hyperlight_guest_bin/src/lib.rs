@@ -35,6 +35,7 @@ use hyperlight_guest::guest_handle::handle::GuestHandle;
 use hyperlight_guest_tracing::{trace, trace_function};
 use log::LevelFilter;
 use spin::Once;
+use tracing::{event, instrument, span};
 
 // === Modules ===
 #[cfg(target_arch = "x86_64")]
@@ -206,9 +207,16 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
                 .expect("Invalid log level");
             init_logger(max_log_level);
 
-            trace!("hyperlight_main",
-                hyperlight_main();
-            );
+            #[cfg(feature = "std_trace_guest")]
+            hyperlight_guest_tracing::init_guest_tracing();
+
+            let sp = span!(tracing::Level::INFO, "hyperlight_guest_bin_entrypoint",);
+
+            let _entered = sp.entered();
+
+            log::info!("before calling hyperlight_main",);
+            hyperlight_main();
+            log::info!("after calling hyperlight_main",);
         }
     });
 

@@ -12,5 +12,6 @@ hyperlight-guest-tracing = { path = "../../../hyperlight_guest_tracing" }
 [features]
 default = []
 trace_guest = ["hyperlight-guest-bin/trace_guest", "hyperlight-guest/trace_guest", "hyperlight-guest-tracing/trace"]
+std_trace_guest = ["hyperlight-guest-bin/std_trace_guest", "hyperlight-guest/std_trace_guest", "hyperlight-guest-tracing/std_trace"]
 unwind_guest = ["hyperlight-common/unwind_guest"]
 mem_profile = ["hyperlight-common/mem_profile", "hyperlight-guest-bin/mem_profile"]

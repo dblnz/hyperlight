@@ -48,7 +48,7 @@ use mshv_bindings::{
     hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
     hv_partition_synthetic_processor_features,
 };
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use mshv_bindings::{
     hv_register_name, hv_register_name_HV_X64_REGISTER_RAX, hv_register_name_HV_X64_REGISTER_RBP,
     hv_register_name_HV_X64_REGISTER_RCX, hv_register_name_HV_X64_REGISTER_RSP,
@@ -58,7 +58,7 @@ use tracing::{Span, instrument};
 #[cfg(crashdump)]
 use {super::crashdump, std::path::Path};
 
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use super::TraceRegister;
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
@@ -80,7 +80,7 @@ use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::sandbox::SandboxConfiguration;
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use crate::sandbox::TraceInfo;
 use crate::sandbox::host_funcs::FunctionRegistry;
 use crate::sandbox::mem_mgr::MemMgrWrapper;
@@ -328,7 +328,7 @@ pub(crate) struct HypervLinuxDriver {
     gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
     #[cfg(crashdump)]
     rt_cfg: SandboxRuntimeConfig,
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     #[allow(dead_code)]
     trace_info: TraceInfo,
 }
@@ -353,7 +353,7 @@ impl HypervLinuxDriver {
         config: &SandboxConfiguration,
         #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
         #[cfg(crashdump)] rt_cfg: SandboxRuntimeConfig,
-        #[cfg(feature = "trace_guest")] trace_info: TraceInfo,
+        #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))] trace_info: TraceInfo,
     ) -> Result<Self> {
         let mshv = Mshv::new()?;
         let pr = Default::default();
@@ -464,7 +464,7 @@ impl HypervLinuxDriver {
             gdb_conn,
             #[cfg(crashdump)]
             rt_cfg,
-            #[cfg(feature = "trace_guest")]
+            #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
             trace_info,
         };
 
@@ -568,7 +568,7 @@ impl Debug for HypervLinuxDriver {
     }
 }
 
-#[cfg(feature = "trace_guest")]
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 impl From<TraceRegister> for hv_register_name {
     fn from(r: TraceRegister) -> Self {
         match r {
@@ -706,7 +706,7 @@ impl Hypervisor for HypervLinuxDriver {
         padded[..copy_len].copy_from_slice(&data[..copy_len]);
         let val = u32::from_le_bytes(padded);
 
-        #[cfg(feature = "trace_guest")]
+        #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
         {
             // We need to handle the borrow checker issue where we need both:
             // - &mut MemMgrWrapper (from self.mem_mgr.as_mut())
@@ -727,7 +727,7 @@ impl Hypervisor for HypervLinuxDriver {
             self.mem_mgr = Some(mem_mgr);
         }
 
-        #[cfg(not(feature = "trace_guest"))]
+        #[cfg(not(any(feature = "trace_guest", feature = "std_trace_guest")))]
         {
             let mem_mgr = self
                 .mem_mgr
@@ -1166,7 +1166,7 @@ impl Hypervisor for HypervLinuxDriver {
         }
     }
 
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64> {
         let mut assoc = [hv_register_assoc {
             name: reg.into(),
@@ -1177,11 +1177,11 @@ impl Hypervisor for HypervLinuxDriver {
         unsafe { Ok(assoc[0].value.reg64) }
     }
 
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     fn trace_info_as_ref(&self) -> &TraceInfo {
         &self.trace_info
     }
-    #[cfg(feature = "trace_guest")]
+    #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
     fn trace_info_as_mut(&mut self) -> &mut TraceInfo {
         &mut self.trace_info
     }

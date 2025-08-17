@@ -25,6 +25,8 @@ use hyperlight_common::outb::OutBAction;
 pub fn halt() {
     // Ensure all tracing data is flushed before halting
     hyperlight_guest_tracing::flush!();
+    #[cfg(feature = "std_trace_guest")]
+    hyperlight_guest_tracing::send_to_host();
     unsafe { asm!("hlt", options(nostack)) }
 }
 
@@ -90,6 +92,25 @@ pub(crate) fn outb(port: u16, data: &[u8]) {
 /// OUT function for sending a 32-bit value to the host.
 #[hyperlight_guest_tracing::trace_function]
 pub(crate) unsafe fn out32(port: u16, val: u32) {
+    // #[cfg(feature = "std_trace_guest")]
+    // {
+    //     let tbi = hyperlight_guest_tracing::guest_trace_info();
+    //     unsafe {
+    //         asm!("out dx, eax",
+    //             in("dx") port,
+    //             in("eax") val,
+    //             in("r8") OutBAction::TraceBatch as u64,
+    //             in("r9") tbi.spans_ptr,
+    //             in("r10") tbi.events_ptr,
+    //             in("r11") tbi.stack_ptr,
+    //             options(preserves_flags, nomem, nostack)
+    //         );
+    //     }
+    // }
+
+    // #[cfg(not(feature = "std_trace_guest"))]
+    #[cfg(feature = "std_trace_guest")]
+    hyperlight_guest_tracing::send_to_host();
     unsafe {
         asm!("out dx, eax", in("dx") port, in("eax") val, options(preserves_flags, nomem, nostack));
     }
