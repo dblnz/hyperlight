@@ -18,6 +18,7 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::slice::from_raw_parts;
+use tracing::{instrument, Span};
 
 use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, FunctionCallType};
 use hyperlight_common::flatbuffer_wrappers::function_types::{
@@ -36,6 +37,7 @@ use crate::exit::out32;
 impl GuestHandle {
     /// Get user memory region as bytes.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn read_n_bytes_from_user_memory(&self, num: u64) -> Result<Vec<u8>> {
         let peb_ptr = self.peb().unwrap();
         let user_memory_region_ptr = unsafe { (*peb_ptr).init_data.ptr as *mut u8 };
@@ -65,6 +67,7 @@ impl GuestHandle {
     /// When calling `call_host_function<T>`, this function is called
     /// internally to get the return value.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn get_host_return_value<T: TryFrom<ReturnValue>>(&self) -> Result<T> {
         let return_value = self
             .try_pop_shared_input_data_into::<ReturnValue>()
@@ -86,6 +89,7 @@ impl GuestHandle {
     /// Note: The function return value must be obtained by calling
     /// `get_host_return_value`.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn call_host_function_without_returning_result(
         &self,
         function_name: &str,
@@ -118,6 +122,7 @@ impl GuestHandle {
     ///
     /// The return value is deserialized into the specified type `T`.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn call_host_function<T: TryFrom<ReturnValue>>(
         &self,
         function_name: &str,
@@ -129,6 +134,7 @@ impl GuestHandle {
     }
 
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn get_host_function_details(&self) -> HostFunctionDetails {
         let peb_ptr = self.peb().unwrap();
         let host_function_details_buffer =
@@ -146,6 +152,7 @@ impl GuestHandle {
 
     /// Write an error to the shared output data buffer.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn write_error(&self, error_code: ErrorCode, message: Option<&str>) {
         let guest_error: GuestError = GuestError::new(
             error_code,
@@ -162,6 +169,7 @@ impl GuestHandle {
 
     /// Log a message with the specified log level, source, caller, source file, and line number.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn log_message(
         &self,
         log_level: LogLevel,
@@ -171,24 +179,33 @@ impl GuestHandle {
         source_file: &str,
         line: u32,
     ) {
-        let guest_log_data = GuestLogData::new(
-            message.to_string(),
-            source.to_string(),
-            log_level,
-            caller.to_string(),
-            source_file.to_string(),
-            line,
+        // let guest_log_data = GuestLogData::new(
+        //     message.to_string(),
+        //     source.to_string(),
+        //     log_level,
+        //     caller.to_string(),
+        //     source_file.to_string(),
+        //     line,
+        // );
+
+        tracing::trace!(
+            event = message,
+            level = ?log_level,
+            code.filepath = source,
+            caller = caller,
+            source_file = source_file,
+            code.lineno = line,
         );
 
-        let bytes: Vec<u8> = guest_log_data
-            .try_into()
-            .expect("Failed to convert GuestLogData to bytes");
+        // let bytes: Vec<u8> = guest_log_data
+        //     .try_into()
+        //     .expect("Failed to convert GuestLogData to bytes");
 
-        self.push_shared_output_data(bytes)
-            .expect("Unable to push log data to shared output data");
+        // self.push_shared_output_data(bytes)
+        //     .expect("Unable to push log data to shared output data");
 
-        unsafe {
-            out32(OutBAction::Log as u16, 0);
-        }
+        // unsafe {
+        //     out32(OutBAction::Log as u16, 0);
+        // }
     }
 }

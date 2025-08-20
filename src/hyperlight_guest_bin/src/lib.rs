@@ -32,10 +32,9 @@ use hyperlight_common::mem::HyperlightPEB;
 use hyperlight_common::outb::OutBAction;
 use hyperlight_guest::exit::{abort_with_code_and_message, halt};
 use hyperlight_guest::guest_handle::handle::GuestHandle;
-use hyperlight_guest_tracing::{trace, trace_function};
+use hyperlight_guest_tracing::trace_function;
 use log::LevelFilter;
 use spin::Once;
-use tracing::{event, instrument, span};
 
 // === Modules ===
 #[cfg(target_arch = "x86_64")]
@@ -159,6 +158,10 @@ static INIT: Once = Once::new();
 #[unsafe(no_mangle)]
 #[trace_function]
 pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
+    // Save the guest start TSC for tracing
+    #[cfg(feature = "std_trace_guest")]
+    let guest_start_tsc = hyperlight_guest_tracing::invariant_tsc::read_tsc();
+
     if peb_address == 0 {
         panic!("PEB address is null");
     }
@@ -207,16 +210,12 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
                 .expect("Invalid log level");
             init_logger(max_log_level);
 
+            // It is important that all the tracing events are produced after the tracing is initialized.
+            // TODO: Maybe it is worth enabling with a runtime config also?
             #[cfg(feature = "std_trace_guest")]
-            hyperlight_guest_tracing::init_guest_tracing();
+            hyperlight_guest_tracing::init_guest_tracing(guest_start_tsc);
 
-            let sp = span!(tracing::Level::INFO, "hyperlight_guest_bin_entrypoint",);
-
-            let _entered = sp.entered();
-
-            log::info!("before calling hyperlight_main",);
             hyperlight_main();
-            log::info!("after calling hyperlight_main",);
         }
     });
 

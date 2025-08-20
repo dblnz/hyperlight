@@ -21,7 +21,7 @@ use crate::error::HyperlightError::ExecutionCanceledByHost;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::metrics::METRIC_GUEST_CANCELLATION;
 #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use crate::sandbox::TraceInfo;
+use crate::sandbox::trace::TraceInfo;
 use crate::{HyperlightError, Result, log_then_return};
 
 /// Util for handling x87 fpu state
@@ -120,19 +120,34 @@ pub enum HyperlightExit {
     Retry(),
 }
 
-/// Registers which may be useful for tracing/stack unwinding
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-pub enum TraceRegister {
-    /// RAX
-    RAX,
-    /// RCX
-    RCX,
-    /// RIP
-    RIP,
-    /// RSP
-    RSP,
-    /// RBP
-    RBP,
+/// Struct that contains the x86_64 core registers
+#[derive(Debug, Default)]
+#[cfg(any(
+    gdb,
+    feature = "trace_guest",
+    feature = "std_trace_guest",
+    feature = "unwind_guest",
+    feature = "mem_profile"
+))]
+pub(crate) struct X86_64Regs {
+    pub(crate) rax: u64,
+    pub(crate) rbx: u64,
+    pub(crate) rcx: u64,
+    pub(crate) rdx: u64,
+    pub(crate) rsi: u64,
+    pub(crate) rdi: u64,
+    pub(crate) rbp: u64,
+    pub(crate) rsp: u64,
+    pub(crate) r8: u64,
+    pub(crate) r9: u64,
+    pub(crate) r10: u64,
+    pub(crate) r11: u64,
+    pub(crate) r12: u64,
+    pub(crate) r13: u64,
+    pub(crate) r14: u64,
+    pub(crate) r15: u64,
+    pub(crate) rip: u64,
+    pub(crate) rflags: u64,
 }
 
 /// A common set of hypervisor functionality
@@ -251,7 +266,7 @@ pub(crate) trait Hypervisor: Debug + Send {
 
     /// Read a register for trace/unwind purposes
     #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-    fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64>;
+    fn read_regs(&self) -> Result<X86_64Regs>;
 
     /// Get a reference of the trace info for the guest
     #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]

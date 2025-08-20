@@ -23,11 +23,13 @@ use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::halt;
 
+use tracing::{instrument, Span};
 use crate::{GUEST_HANDLE, REGISTERED_GUEST_FUNCTIONS};
 
 type GuestFunc = fn(&FunctionCall) -> Result<Vec<u8>>;
 
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>> {
     // Validate this is a Guest Function Call
     if function_call.function_call_type() != FunctionCallType::Guest {
@@ -84,6 +86,7 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
 #[unsafe(no_mangle)]
 #[inline(never)]
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 fn internal_dispatch_function() -> Result<()> {
     let handle = unsafe { GUEST_HANDLE };
 
@@ -105,6 +108,7 @@ fn internal_dispatch_function() -> Result<()> {
 // which if it were included in the internal_dispatch_function cause the epilogue to not be called because the halt() would not return
 // when running in the hypervisor.
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) extern "C" fn dispatch_function() {
     // The hyperlight host likes to use one partition and reset it in
     // various ways; if that has happened, there might stale TLB

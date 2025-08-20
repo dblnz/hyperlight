@@ -16,6 +16,7 @@ anyhow = { version = "1.0.99", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 hyperlight-common = { workspace = true }
 hyperlight-guest-tracing = { workspace = true, default-features = false }
+tracing = { version = "0.1.41", default-features = false, features = ["attributes"] }
 
 [features]
 default = []

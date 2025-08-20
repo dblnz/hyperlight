@@ -19,6 +19,7 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::any::type_name;
 use core::slice::from_raw_parts_mut;
+use tracing::{instrument, Span};
 
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 
@@ -28,6 +29,7 @@ use crate::error::{HyperlightGuestError, Result};
 impl GuestHandle {
     /// Pops the top element from the shared input data buffer and returns it as a T
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn try_pop_shared_input_data_into<T>(&self) -> Result<T>
     where
         T: for<'a> TryFrom<&'a [u8]>,
@@ -93,6 +95,7 @@ impl GuestHandle {
 
     /// Pushes the given data onto the shared output data buffer.
     #[hyperlight_guest_tracing::trace_function]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn push_shared_output_data(&self, data: Vec<u8>) -> Result<()> {
         let peb_ptr = self.peb().unwrap();
         let output_stack_size = unsafe { (*peb_ptr).output_stack.size as usize };

@@ -112,6 +112,7 @@ dependencies = [
  "hyperlight-common",
  "hyperlight-guest-tracing",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

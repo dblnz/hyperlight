@@ -48,18 +48,11 @@ use mshv_bindings::{
     hv_partition_property_code_HV_PARTITION_PROPERTY_SYNTHETIC_PROC_FEATURES,
     hv_partition_synthetic_processor_features,
 };
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use mshv_bindings::{
-    hv_register_name, hv_register_name_HV_X64_REGISTER_RAX, hv_register_name_HV_X64_REGISTER_RBP,
-    hv_register_name_HV_X64_REGISTER_RCX, hv_register_name_HV_X64_REGISTER_RSP,
-};
 use mshv_ioctls::{Mshv, VcpuFd, VmFd};
 use tracing::{Span, instrument};
 #[cfg(crashdump)]
 use {super::crashdump, std::path::Path};
 
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use super::TraceRegister;
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
 use super::gdb::{
@@ -75,19 +68,59 @@ use super::{
 use super::{HyperlightExit, Hypervisor, InterruptHandle, LinuxInterruptHandle, VirtualCPU};
 #[cfg(gdb)]
 use crate::HyperlightError;
+#[cfg(any(
+    gdb,
+    feature = "trace_guest",
+    feature = "std_trace_guest",
+    feature = "unwind_guest",
+    feature = "mem_profile"
+))]
+use crate::hypervisor::X86_64Regs;
 use crate::hypervisor::get_memory_access_violation;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::sandbox::SandboxConfiguration;
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use crate::sandbox::TraceInfo;
 use crate::sandbox::host_funcs::FunctionRegistry;
 use crate::sandbox::mem_mgr::MemMgrWrapper;
 use crate::sandbox::outb::handle_outb;
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
+use crate::sandbox::trace::TraceInfo;
 #[cfg(crashdump)]
 use crate::sandbox::uninitialized::SandboxRuntimeConfig;
 use crate::{Result, log_then_return, new_error};
+
+#[cfg(any(
+    gdb,
+    feature = "trace_guest",
+    feature = "std_trace_guest",
+    feature = "unwind_guest",
+    feature = "mem_profile"
+))]
+impl From<StandardRegisters> for X86_64Regs {
+    fn from(regs: StandardRegisters) -> Self {
+        X86_64Regs {
+            rax: regs.rax,
+            rbx: regs.rbx,
+            rcx: regs.rcx,
+            rdx: regs.rdx,
+            rdi: regs.rdi,
+            rsi: regs.rsi,
+            rsp: regs.rsp,
+            rbp: regs.rbp,
+            r8: regs.r8,
+            r9: regs.r9,
+            r10: regs.r10,
+            r11: regs.r11,
+            r12: regs.r12,
+            r13: regs.r13,
+            r14: regs.r14,
+            r15: regs.r15,
+            rip: regs.rip,
+            rflags: regs.rflags,
+        }
+    }
+}
 
 #[cfg(gdb)]
 mod debug {
@@ -95,7 +128,8 @@ mod debug {
 
     use super::mshv_bindings::hv_x64_exception_intercept_message;
     use super::{HypervLinuxDriver, *};
-    use crate::hypervisor::gdb::{DebugMsg, DebugResponse, VcpuStopReason, X86_64Regs};
+    use crate::hypervisor::gdb::{DebugMsg, DebugResponse, VcpuStopReason};
+    use crate::hypervisor::X86_64Regs;
     use crate::hypervisor::handlers::DbgMemAccessHandlerCaller;
     use crate::{Result, new_error};
 
@@ -568,19 +602,6 @@ impl Debug for HypervLinuxDriver {
     }
 }
 
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-impl From<TraceRegister> for hv_register_name {
-    fn from(r: TraceRegister) -> Self {
-        match r {
-            TraceRegister::RAX => hv_register_name_HV_X64_REGISTER_RAX,
-            TraceRegister::RCX => hv_register_name_HV_X64_REGISTER_RCX,
-            TraceRegister::RIP => hv_register_name_HV_X64_REGISTER_RIP,
-            TraceRegister::RSP => hv_register_name_HV_X64_REGISTER_RSP,
-            TraceRegister::RBP => hv_register_name_HV_X64_REGISTER_RBP,
-        }
-    }
-}
-
 impl Hypervisor for HypervLinuxDriver {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     fn initialise(
@@ -796,14 +817,9 @@ impl Hypervisor for HypervLinuxDriver {
         {
             Err(mshv_ioctls::MshvError::from(libc::EINTR))
         } else {
-            #[cfg(feature = "trace_guest")]
-            if self.trace_info.guest_start_epoch.is_none() {
-                // Store the guest start epoch and cycles to trace the guest execution time
-                crate::debug!("MSHV - Guest Start Epoch set");
-                self.trace_info.guest_start_tsc =
-                    Some(hyperlight_guest_tracing::invariant_tsc::read_tsc());
-                self.trace_info.guest_start_epoch = Some(std::time::Instant::now());
-            }
+            #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
+            self.trace_info.setup_guest_trace();
+
             // Note: if a `InterruptHandle::kill()` called while this thread is **here**
             // Then the vcpu will run, but we will keep sending signals to this thread
             // to interrupt it until `running` is set to false. The `vcpu_fd::run()` call will
@@ -1167,14 +1183,8 @@ impl Hypervisor for HypervLinuxDriver {
     }
 
     #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-    fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64> {
-        let mut assoc = [hv_register_assoc {
-            name: reg.into(),
-            ..Default::default()
-        }];
-        self.vcpu_fd.get_reg(&mut assoc)?;
-        // safety: all registers that we currently support are 64-bit
-        unsafe { Ok(assoc[0].value.reg64) }
+    fn read_regs(&self) -> Result<X86_64Regs> {
+        Ok(X86_64Regs::from(self.vcpu_fd.get_regs()?))
     }
 
     #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]

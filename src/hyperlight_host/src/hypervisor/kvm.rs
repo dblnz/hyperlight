@@ -27,8 +27,6 @@ use tracing::{Span, instrument};
 #[cfg(crashdump)]
 use {super::crashdump, std::path::Path};
 
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use super::TraceRegister;
 use super::fpu::{FP_CONTROL_WORD_DEFAULT, FP_TAG_WORD_DEFAULT, MXCSR_DEFAULT};
 #[cfg(gdb)]
 use super::gdb::{DebugCommChannel, DebugMsg, DebugResponse, GuestDebug, KvmDebug, VcpuStopReason};
@@ -42,19 +40,58 @@ use super::{
 use super::{HyperlightExit, Hypervisor, InterruptHandle, LinuxInterruptHandle, VirtualCPU};
 #[cfg(gdb)]
 use crate::HyperlightError;
+#[cfg(any(
+    gdb,
+    feature = "trace_guest",
+    feature = "std_trace_guest",
+    feature = "unwind_guest",
+    feature = "mem_profile"
+))]
+use crate::hypervisor::X86_64Regs;
 use crate::hypervisor::get_memory_access_violation;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::mem::ptr::{GuestPtr, RawPtr};
 use crate::mem::shared_mem::HostSharedMemory;
 use crate::sandbox::SandboxConfiguration;
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use crate::sandbox::TraceInfo;
 use crate::sandbox::host_funcs::FunctionRegistry;
 use crate::sandbox::mem_mgr::MemMgrWrapper;
 use crate::sandbox::outb::handle_outb;
+#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
+use crate::sandbox::trace::TraceInfo;
 #[cfg(crashdump)]
 use crate::sandbox::uninitialized::SandboxRuntimeConfig;
 use crate::{Result, log_then_return, new_error};
+
+#[cfg(any(
+    gdb,
+    feature = "std_trace_guest",
+    feature = "unwind_guest",
+    feature = "mem_profile"
+))]
+impl From<kvm_regs> for X86_64Regs {
+    fn from(regs: kvm_regs) -> Self {
+        X86_64Regs {
+            rax: regs.rax,
+            rbx: regs.rbx,
+            rcx: regs.rcx,
+            rdx: regs.rdx,
+            rdi: regs.rdi,
+            rsi: regs.rsi,
+            rsp: regs.rsp,
+            rbp: regs.rbp,
+            r8: regs.r8,
+            r9: regs.r9,
+            r10: regs.r10,
+            r11: regs.r11,
+            r12: regs.r12,
+            r13: regs.r13,
+            r14: regs.r14,
+            r15: regs.r15,
+            rip: regs.rip,
+            rflags: regs.rflags,
+        }
+    }
+}
 
 /// Return `true` if the KVM API is available, version 12, and has UserMemory capability, or `false` otherwise
 #[instrument(skip_all, parent = Span::current(), level = "Trace")]
@@ -86,8 +123,9 @@ mod debug {
 
     use super::KVMDriver;
     use crate::hypervisor::gdb::{
-        DebugMsg, DebugResponse, GuestDebug, KvmDebug, VcpuStopReason, X86_64Regs,
+        DebugMsg, DebugResponse, GuestDebug, KvmDebug, VcpuStopReason,
     };
+    use crate::hypervisor::X86_64Regs;
     use crate::hypervisor::handlers::DbgMemAccessHandlerCaller;
     use crate::{Result, new_error};
 
@@ -698,14 +736,8 @@ impl Hypervisor for KVMDriver {
         {
             Err(kvm_ioctls::Error::new(libc::EINTR))
         } else {
-            #[cfg(feature = "trace_guest")]
-            if self.trace_info.guest_start_epoch.is_none() {
-                // Store the guest start epoch and cycles to trace the guest execution time
-                crate::debug!("KVM - Guest Start Epoch set");
-                self.trace_info.guest_start_epoch = Some(std::time::Instant::now());
-                self.trace_info.guest_start_tsc =
-                    Some(hyperlight_guest_tracing::invariant_tsc::read_tsc());
-            }
+            #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
+            self.trace_info.setup_guest_trace();
 
             // Note: if a `InterruptHandle::kill()` called while this thread is **here**
             // Then the vcpu will run, but we will keep sending signals to this thread
@@ -823,6 +855,18 @@ impl Hypervisor for KVMDriver {
                 HyperlightExit::Unknown(err_msg)
             }
         };
+
+        // If trace is enabled, process the trace batch
+        #[cfg(feature = "std_trace_guest")]
+        match result {
+            HyperlightExit::Halt() | HyperlightExit::IoOut(_, _, _, _) | HyperlightExit::Mmio(_) => {
+                // If the result is not a halt, io out, mmio or debug exit, we need to process the trace batch
+                let regs = self.read_regs()?;
+                let _ = self.trace_info.process_trace_batch(&regs, self.mem_mgr.as_mut().unwrap());
+            }
+            _ => {
+            }
+        }
         Ok(result)
     }
 
@@ -1042,15 +1086,8 @@ impl Hypervisor for KVMDriver {
     }
 
     #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-    fn read_trace_reg(&self, reg: TraceRegister) -> Result<u64> {
-        let regs = self.vcpu_fd.get_regs()?;
-        Ok(match reg {
-            TraceRegister::RAX => regs.rax,
-            TraceRegister::RCX => regs.rcx,
-            TraceRegister::RIP => regs.rip,
-            TraceRegister::RSP => regs.rsp,
-            TraceRegister::RBP => regs.rbp,
-        })
+    fn read_regs(&self) -> Result<X86_64Regs> {
+        Ok(X86_64Regs::from(self.vcpu_fd.get_regs()?))
     }
 
     #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]

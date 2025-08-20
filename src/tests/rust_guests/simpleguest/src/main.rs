@@ -32,6 +32,7 @@ use alloc::{format, vec};
 use core::ffi::c_char;
 use core::hint::black_box;
 use core::ptr::write_volatile;
+use tracing::{Span, instrument};
 
 use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, FunctionCallType};
 use hyperlight_common::flatbuffer_wrappers::function_types::{
@@ -93,6 +94,7 @@ fn echo_float(function_call: &FunctionCall) -> Result<Vec<u8>> {
 }
 
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 fn print_output(message: &str) -> Result<Vec<u8>> {
     let res = call_host_function::<i32>(
         "HostPrint",
@@ -104,6 +106,7 @@ fn print_output(message: &str) -> Result<Vec<u8>> {
 }
 
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 fn simple_print_output(function_call: &FunctionCall) -> Result<Vec<u8>> {
     if let ParameterValue::String(message) = function_call.parameters.clone().unwrap()[0].clone() {
         print_output(&message)
@@ -900,6 +903,7 @@ fn exec_mapped_buffer(function_call: &FunctionCall) -> Result<Vec<u8>> {
 
 #[no_mangle]
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub extern "C" fn hyperlight_main() {
     let read_from_user_memory_def = GuestFunctionDefinition::new(
         "ReadFromUserMemory".to_string(),
@@ -1349,6 +1353,7 @@ pub extern "C" fn hyperlight_main() {
 
 #[no_mangle]
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub fn guest_dispatch_function(function_call: FunctionCall) -> Result<Vec<u8>> {
     // This test checks the stack behavior of the input/output buffer
     // by calling the host before serializing the function call.
@@ -1395,6 +1400,7 @@ pub fn guest_dispatch_function(function_call: FunctionCall) -> Result<Vec<u8>> {
 
 // Interprets the given guest function call as a host function call and dispatches it to the host.
 #[hyperlight_guest_tracing::trace_function]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 fn fuzz_host_function(func: FunctionCall) -> Result<Vec<u8>> {
     let mut params = func.parameters.unwrap();
     // first parameter must be string (the name of the host function to call)

@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "unwind_guest")]
@@ -36,12 +34,8 @@ use super::host_funcs::FunctionRegistry;
 use super::mem_mgr::MemMgrWrapper;
 #[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
 use crate::hypervisor::Hypervisor;
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
-#[cfg(any(feature = "trace_guest", feature = "std_trace_guest"))]
-use crate::sandbox::TraceInfo;
 use crate::{HyperlightError, Result, new_error};
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level="Trace")]
@@ -156,116 +150,6 @@ fn outb_abort(mem_mgr: &mut MemMgrWrapper<HostSharedMemory>, data: u32) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "unwind_guest")]
-fn unwind(
-    hv: &dyn Hypervisor,
-    mem: &SandboxMemoryManager<HostSharedMemory>,
-    trace_info: &TraceInfo,
-) -> Result<Vec<u64>> {
-    let mut read_stack = |addr| {
-        mem.shared_mem
-            .read::<u64>((addr - SandboxMemoryLayout::BASE_ADDRESS as u64) as usize)
-            .map_err(|_| ())
-    };
-    let mut cache = trace_info
-        .unwind_cache
-        .try_lock()
-        .map_err(|e| new_error!("could not lock unwinder cache {}\n", e))?;
-    let iter = trace_info.unwinder.iter_frames(
-        hv.read_trace_reg(crate::hypervisor::TraceRegister::RIP)?,
-        framehop::x86_64::UnwindRegsX86_64::new(
-            hv.read_trace_reg(crate::hypervisor::TraceRegister::RIP)?,
-            hv.read_trace_reg(crate::hypervisor::TraceRegister::RSP)?,
-            hv.read_trace_reg(crate::hypervisor::TraceRegister::RBP)?,
-        ),
-        &mut *cache,
-        &mut read_stack,
-    );
-    iter.map(|f| Ok(f.address() - mem.layout.get_guest_code_address() as u64))
-        .collect()
-        .map_err(|e| new_error!("couldn't unwind: {}", e))
-}
-
-#[cfg(feature = "unwind_guest")]
-fn write_stack(out: &mut std::fs::File, stack: &[u64]) {
-    let _ = out.write_all(&stack.len().to_ne_bytes());
-    for frame in stack {
-        let _ = out.write_all(&frame.to_ne_bytes());
-    }
-}
-
-#[cfg(feature = "unwind_guest")]
-pub(super) fn record_trace_frame<F: FnOnce(&mut std::fs::File)>(
-    trace_info: &TraceInfo,
-    frame_id: u64,
-    write_frame: F,
-) -> Result<()> {
-    let Ok(mut out) = trace_info.file.lock() else {
-        return Ok(());
-    };
-    // frame structure:
-    // 16 bytes timestamp
-    let now = std::time::Instant::now().saturating_duration_since(trace_info.epoch);
-    let _ = out.write_all(&now.as_micros().to_ne_bytes());
-    // 8 bytes frame type id
-    let _ = out.write_all(&frame_id.to_ne_bytes());
-    // frame data
-    write_frame(&mut out);
-    Ok(())
-}
-
-#[cfg(feature = "trace_guest")]
-pub(super) fn record_guest_trace_frame<F: FnOnce(&mut std::fs::File)>(
-    trace_info: &TraceInfo,
-    frame_id: u64,
-    cycles: u64,
-    write_frame: F,
-) -> Result<()> {
-    let Ok(mut out) = trace_info.file.lock() else {
-        return Ok(());
-    };
-    // frame structure:
-    // 16 bytes timestamp
-
-    // The number of cycles spent in the guest relative to the first received trace record
-    let cycles_spent = cycles
-        - trace_info
-            .guest_start_tsc
-            .as_ref()
-            .map_or_else(|| 0, |c| *c);
-
-    // Convert cycles to microseconds based on the TSC frequency
-    let tsc_freq = trace_info
-        .tsc_freq
-        .as_ref()
-        .ok_or_else(|| new_error!("TSC frequency not set in TraceInfo"))?;
-    let micros = cycles_spent as f64 / *tsc_freq as f64 * 1_000_000f64;
-
-    // Convert to a Duration
-    let guest_duration = std::time::Duration::from_micros(micros as u64);
-
-    // Calculate the time when the guest started execution relative to the host epoch
-    // Note: This is relative to the time saved when the `TraceInfo` was created (before the
-    // Hypervisor is created).
-    let guest_start_time = trace_info
-        .guest_start_epoch
-        .as_ref()
-        .unwrap_or(&trace_info.epoch)
-        .saturating_duration_since(trace_info.epoch);
-
-    // Calculate the timestamp when the actual frame was recorded relative to the host epoch
-    let timestamp = guest_start_time
-        .checked_add(guest_duration)
-        .unwrap_or(guest_duration);
-
-    let _ = out.write_all(&timestamp.as_micros().to_ne_bytes());
-    // 8 bytes frame type id
-    let _ = out.write_all(&frame_id.to_ne_bytes());
-    // frame data
-    write_frame(&mut out);
-    Ok(())
-}
-
 /// Handles OutB operations from the guest.
 #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) fn handle_outb(
@@ -275,6 +159,15 @@ pub(crate) fn handle_outb(
     port: u16,
     data: u32,
 ) -> Result<()> {
+    // #[cfg(feature = "std_trace_guest")]
+    // if let Ok(regs) = _hv.read_regs() {
+    //     // Check additional magic number set in the guest
+    //     if regs.r8 == OutBAction::TraceBatch as u64 {
+    //         let trace_info = _hv.trace_info_as_mut();
+    //         trace_info.process_trace_batch(&regs, mem_mgr)?;
+    //     }
+    // }
+
     match port.try_into()? {
         OutBAction::Log => outb_log(mem_mgr.as_mut()),
         OutBAction::CallFunction => {
@@ -305,16 +198,20 @@ pub(crate) fn handle_outb(
         }
         #[cfg(feature = "unwind_guest")]
         OutBAction::TraceRecordStack => {
-            let Ok(stack) = unwind(_hv, mem_mgr.as_ref(), _hv.trace_info_as_ref()) else {
+            let Ok(stack) =
+                crate::sandbox::trace::unwind(_hv, mem_mgr.as_ref(), _hv.trace_info_as_ref())
+            else {
                 return Ok(());
             };
-            record_trace_frame(_hv.trace_info_as_ref(), 1u64, |f| {
+            crate::sandbox::trace::record_trace_frame(_hv.trace_info_as_ref(), 1u64, |f| {
                 write_stack(f, &stack);
             })
         }
         #[cfg(feature = "mem_profile")]
         OutBAction::TraceMemoryAlloc => {
-            let Ok(stack) = unwind(_hv, mem_mgr.as_ref(), _hv.trace_info_as_ref()) else {
+            let Ok(stack) =
+                crate::sandbox::trace::unwind(_hv, mem_mgr.as_ref(), _hv.trace_info_as_ref())
+            else {
                 return Ok(());
             };
             let Ok(amt) = _hv.read_trace_reg(crate::hypervisor::TraceRegister::RAX) else {
@@ -323,23 +220,25 @@ pub(crate) fn handle_outb(
             let Ok(ptr) = _hv.read_trace_reg(crate::hypervisor::TraceRegister::RCX) else {
                 return Ok(());
             };
-            record_trace_frame(_hv.trace_info_as_ref(), 2u64, |f| {
+            crate::sandbox::trace::record_trace_frame(_hv.trace_info_as_ref(), 2u64, |f| {
                 let _ = f.write_all(&ptr.to_ne_bytes());
                 let _ = f.write_all(&amt.to_ne_bytes());
-                write_stack(f, &stack);
+                crate::sandbox::trace::write_stack(f, &stack);
             })
         }
         #[cfg(feature = "mem_profile")]
         OutBAction::TraceMemoryFree => {
-            let Ok(stack) = unwind(_hv, mem_mgr.as_ref(), _hv.trace_info_as_ref()) else {
+            let Ok(stack) =
+                crate::sandbox::trace::unwind(_hv, mem_mgr.as_ref(), _hv.trace_info_as_ref())
+            else {
                 return Ok(());
             };
             let Ok(ptr) = _hv.read_trace_reg(crate::hypervisor::TraceRegister::RCX) else {
                 return Ok(());
             };
-            record_trace_frame(_hv.trace_info_as_ref(), 3u64, |f| {
+            crate::sandbox::trace::record_trace_frame(_hv.trace_info_as_ref(), 3u64, |f| {
                 let _ = f.write_all(&ptr.to_ne_bytes());
-                write_stack(f, &stack);
+                crate::sandbox::trace::write_stack(f, &stack);
             })
         }
         #[cfg(feature = "trace_guest")]
@@ -393,126 +292,21 @@ pub(crate) fn handle_outb(
             }
 
             for record in traces {
-                record_guest_trace_frame(_hv.trace_info_as_ref(), 4u64, record.cycles, |f| {
-                    let _ = f.write_all(&record.msg_len.to_ne_bytes());
-                    let _ = f.write_all(&record.msg[..record.msg_len]);
-                })?
+                crate::sandbox::trace::record_guest_trace_frame(
+                    _hv.trace_info_as_ref(),
+                    4u64,
+                    record.cycles,
+                    |f| {
+                        let _ = f.write_all(&record.msg_len.to_ne_bytes());
+                        let _ = f.write_all(&record.msg[..record.msg_len]);
+                    },
+                )?
             }
 
             Ok(())
         }
         #[cfg(feature = "std_trace_guest")]
-        OutBAction::TraceBatch => {
-            if let Ok(regs) = _hv.read_regs() {
-                let magic_no = regs.r8;
-                let spans_ptr = regs.r9 as usize;
-                let events_ptr = regs.r10 as usize;
-                let stack_ptr = regs.r11 as usize;
-                if magic_no != OutBAction::TraceBatch as u64 {
-                    return Ok(());
-                }
-                let mut spans = vec![0u8; std::mem::size_of::<hyperlight_guest_tracing::Spans>()];
-                let mut events = vec![0u8; std::mem::size_of::<hyperlight_guest_tracing::Events>()];
-                let mut stack = vec![0u8; std::mem::size_of::<hyperlight_guest_tracing::Stack>()];
-                mem_mgr
-                    .as_ref()
-                    .shared_mem
-                    .copy_to_slice(&mut spans, spans_ptr - SandboxMemoryLayout::BASE_ADDRESS)
-                    .map_err(|e| {
-                        new_error!(
-                            "Failed to copy guest trace batch from guest memory to host: {:?}",
-                            e
-                        )
-                    })?;
-                mem_mgr
-                    .as_ref()
-                    .shared_mem
-                    .copy_to_slice(&mut events, events_ptr - SandboxMemoryLayout::BASE_ADDRESS)
-                    .map_err(|e| {
-                        new_error!(
-                            "Failed to copy guest trace batch from guest memory to host: {:?}",
-                            e
-                        )
-                    })?;
-                mem_mgr
-                    .as_ref()
-                    .shared_mem
-                    .copy_to_slice(&mut stack, stack_ptr - SandboxMemoryLayout::BASE_ADDRESS)
-                    .map_err(|e| {
-                        new_error!(
-                            "Failed to copy guest trace batch from guest memory to host: {:?}",
-                            e
-                        )
-                    })?;
-
-                let spans = spans as *const hyperlight_guest_tracing::Spans;
-                let events = events as *const hyperlight_guest_tracing::Events;
-                let stack = stack as *const hyperlight_guest_tracing::Stack;
-
-                let trace_info = _hv.trace_info_as_mut();
-                if trace_info.tsc_freq.is_none() {
-                    trace_info.calculate_tsc_freq()?;
-                }
-                let tsc_freq = trace_info.tsc_freq.expect("tsc freq");
-                let guest_start_tsc = trace_info.guest_start_tsc.unwrap_or(0);
-
-                let tracer = global::tracer("hyperlight-guest");
-                let parent_ctx = Span::current().context();
-                let spans = batch.spans;
-
-                for s in spans.iter() {
-                    let start_cycles = s.start_tsc.saturating_sub(guest_start_tsc);
-                    let end_cycles = s
-                        .end_tsc
-                        .unwrap_or(s.start_tsc)
-                        .saturating_sub(guest_start_tsc);
-                    let start_us = (start_cycles as f64 / tsc_freq as f64 * 1_000_000f64) as u64;
-                    let end_us = (end_cycles as f64 / tsc_freq as f64 * 1_000_000f64) as u64;
-                    let base = trace_info
-                        .guest_start_epoch
-                        .as_ref()
-                        .unwrap_or(&trace_info.epoch)
-                        .saturating_duration_since(trace_info.epoch);
-                    let start_ts =
-                        trace_info.wall + base + std::time::Duration::from_micros(start_us);
-                    let end_ts = trace_info.wall + base + std::time::Duration::from_micros(end_us);
-
-                    // Use owned String; Into<Cow<'static, str>> is implemented for String
-                    let name_owned: String = s.name.as_str().to_string();
-                    let mut sb = tracer.span_builder(name_owned).with_start_time(start_ts);
-                    // mark that this span is from guest
-                    sb.attributes = Some(vec![
-                        KeyValue::new("hyperlight.guest", true),
-                        KeyValue::new("guest.target", s.target.as_str().to_string()),
-                    ]);
-                    let mut span = sb.start_with_context(&tracer, &parent_ctx);
-
-                    for (k, v) in s.fields.iter() {
-                        span.set_attribute(KeyValue::new(
-                            k.as_str().to_string(),
-                            v.as_str().to_string(),
-                        ));
-                    }
-                    for ev in s.events.iter() {
-                        let cyc = ev.tsc.saturating_sub(guest_start_tsc);
-                        let ev_us = (cyc as f64 / tsc_freq as f64 * 1_000_000f64) as u64;
-                        let ev_ts =
-                            trace_info.wall + base + std::time::Duration::from_micros(ev_us);
-                        span.add_event_with_timestamp(
-                            ev.name.as_str().to_string(),
-                            ev_ts,
-                            ev.fields
-                                .iter()
-                                .map(|(k, v)| {
-                                    KeyValue::new(k.as_str().to_string(), v.as_str().to_string())
-                                })
-                                .collect::<Vec<_>>(),
-                        );
-                    }
-                    span.end_with_timestamp(end_ts);
-                }
-            }
-        }
+        OutBAction::TraceBatch => Ok(()),
     }
 }
 #[cfg(test)]
