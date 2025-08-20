@@ -520,6 +520,33 @@ impl SandboxMemoryManager<HostSharedMemory> {
         )
     }
 
+    /// Read guest log data from the `SharedMemory` contained within `self`
+    #[cfg(feature = "std_trace_guest")]
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn read_guest_trace_context(&mut self) -> Result<hyperlight_guest_tracing::GuestTraceContext> {
+        self.shared_mem.try_pop_buffer_into::<hyperlight_guest_tracing::GuestTraceContext>(
+            self.layout.output_data_buffer_offset,
+            self.layout.sandbox_memory_config.get_output_data_size(),
+        )
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_guest_trace_context(&mut self, buffer: &[u8]) -> Result<()> {
+        validate_guest_function_call_buffer(buffer).map_err(|e| {
+            new_error!(
+                "Guest function call buffer validation failed: {}",
+                e.to_string()
+            )
+        })?;
+
+        self.shared_mem.push_buffer(
+            self.layout.input_data_buffer_offset,
+            self.layout.sandbox_memory_config.get_input_data_size(),
+            buffer,
+        )
+    }
+
+
     /// Get the guest error data
     pub(crate) fn get_guest_error(&mut self) -> Result<GuestError> {
         self.shared_mem.try_pop_buffer_into::<GuestError>(

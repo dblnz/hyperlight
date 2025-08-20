@@ -1476,9 +1476,12 @@ dependencies = [
  "heapless",
  "hyperlight-common",
  "hyperlight-guest-tracing-macro",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "spin 0.10.0",
  "tracing",
  "tracing-core",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -2343,6 +2346,7 @@ dependencies = [
  "opentelemetry",
  "percent-encoding",
  "rand",
+ "serde",
  "serde_json",
  "thiserror 2.0.14",
  "tokio",

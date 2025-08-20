@@ -105,7 +105,7 @@ limitations under the License.
 pub use hyperlight_guest_tracing_macro::*;
 #[cfg(feature = "std_trace")]
 pub use std_trace::{
-    GuestEvent, GuestSpan, Spans, TraceBatchInfo, TraceLevel, init_guest_tracing, guest_trace_info, end_trace,
+    GuestEvent, GuestSpan, GuestTraceContext, Spans, TraceBatchInfo, TraceLevel, init_guest_tracing, guest_trace_info, end_trace,
 };
 #[cfg(feature = "trace")]
 pub use trace::{create_trace_record, flush_trace_buffer};
@@ -163,6 +163,9 @@ mod std_trace {
     extern crate alloc;
     use alloc::sync::{Arc, Weak};
     use core::fmt::Debug;
+    use core::str::FromStr;
+    // import TryFrom
+    use alloc::string::String;
     use core::sync::atomic::{AtomicU64, Ordering};
 
     use heapless as hl;
@@ -209,6 +212,12 @@ mod std_trace {
         MAX_NO_OF_FIELDS,
     >;
 
+    enum InternalState {
+        Tracing,
+        Interrupted,
+        Finalized,
+    }
+
     pub struct TraceState<
         const SP: usize,
         const EV: usize,
@@ -218,11 +227,67 @@ mod std_trace {
         const FV: usize,
         const F: usize,
     > {
+        // context:
+        context: GuestTraceContext,
+        state: InternalState,
         mark_for_clearing: bool,
         guest_start_tsc: u64,
         next_id: AtomicU64,
         spans: hl::Vec<GuestSpan<EV, N, T, FK, FV, F>, SP>,
         stack: hl::Vec<u64, SP>,
+    }
+
+    pub type HashMap<K, V> = hl::Vec<(K, V), 32>;
+
+    pub struct GuestTraceContext {
+        pub metadata: HashMap<hl::String<32>, hl::Vec<hl::String<32>, 32>>,
+    }
+
+    impl TryFrom<&[u8]> for GuestTraceContext {
+        type Error = alloc::string::FromUtf8Error;
+        fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+            
+        }
+    }
+    struct MetadataExtractor<'a>(pub &'a HashMap<hl::String<32>, hl::Vec<hl::String<32>, 32>>);
+    struct MetadataInjector<'a>(pub &'a mut HashMap<hl::String<32>, hl::Vec<hl::String<32>, 32>>);
+
+    use opentelemetry::{global, Context};
+    use opentelemetry::propagation::{Extractor, Injector};
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use tracing::Span;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    impl Extractor for MetadataExtractor<'_> {
+        fn get(&self, key: &str) -> Option<&str> {
+            // self.0.get(key).and_then(|v| v.first()).map(|s| s.as_str())
+            self.0.iter().find(|(k, _)| k.as_str() == key)
+                .and_then(|(_, v)| v.first())
+                .map(|s| s.as_str())
+        }
+
+        fn keys(&self) -> alloc::vec::Vec<&str> {
+            // Collect all keys from the metadata HashMap
+            // self.0.keys().map(|k| k.as_str()).collect()
+            self.0
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect()
+        }
+    }
+
+    impl Injector for MetadataInjector<'_> {
+        fn set(&mut self, key: &str, value: alloc::string::String) {
+            // Insert the key-value pair into the metadata HashMap
+            if let Some(v) = self.0.iter_mut().find(|(k, _)| k.as_str() == key) {
+                let hl_str= hl::String::<32>::from_str(value.as_str()).unwrap();
+                v.1.push(hl_str);
+            } else {
+                let hl_key = hl::String::<32>::from_str(key).unwrap();
+                let hl_value = hl::String::<32>::from_str(value.as_str()).unwrap();
+                self.0.push((hl::String::<32>::from(hl_key), hl::Vec::from(hl::Vec::from_slice(&[hl_value]).unwrap())));
+            }
+        }
     }
 
     impl<
@@ -237,12 +302,52 @@ mod std_trace {
     {
         fn new(guest_start_tsc: u64) -> Self {
             Self {
+                context: GuestTraceContext {metadata: hl::Vec::new()},
+                state: InternalState::Tracing,
                 mark_for_clearing: false,
                 guest_start_tsc,
                 next_id: AtomicU64::new(1),
                 spans: hl::Vec::new(),
                 stack: hl::Vec::new(),
             }
+        }
+
+        fn extract_context(
+            &mut self,
+        ) -> &[u8] {
+            let mut injector = MetadataInjector(&mut self.context.metadata);
+            global::get_text_map_propagator(|propagator| {
+                propagator.inject_context(&Span::current().context(), &mut injector);
+            });
+            // Convert the metadata HashMap to a u8 slice
+            // I want you to get the metadata as a byte slice, without allocating memory.
+            // Just cast the metadata HashMap to a byte slice.
+            let len = core::mem::size_of_val(&self.context.metadata);
+            let data: &[u8] = unsafe {
+                core::slice::from_raw_parts(
+                    self.context.metadata.as_ptr() as *const u8,
+                    len,
+                )
+            };
+
+            data
+        }
+
+        fn import_context(
+            &mut self,
+            metadata: &[u8],
+        ) {
+            // Convert the byte slice back to a metadata HashMap
+            let metadata: &HashMap<hl::String<32>, hl::Vec<hl::String<32>, 32>> = unsafe {
+                // This doesn't work as the types differ in length
+                //core::mem::transmute::<&[u8], HashMap<hl::String<32>, hl::Vec<hl::String<32>, 32>>>(metadata)
+                let ptr = metadata.as_ptr() as *mut hl::Vec<(hl::String<32>, hl::Vec<hl::String<32>, 32>), 32>;
+                &*ptr
+            };
+            let extractor = MetadataExtractor(metadata);
+            opentelemetry::global::get_text_map_propagator(|propagator| {
+                propagator.extract(&extractor)
+            });
         }
 
         fn alloc_id(&self) -> (u64, Id) {
@@ -263,6 +368,7 @@ mod std_trace {
         // Closes the trace by ending all spans
         // NOTE: This expects an outb call to send the spans to the host.
         fn end_trace(&mut self) {
+            self.state = InternalState::Finalized;
             for span in self.spans.iter_mut() {
                 if span.end_tsc.is_none() {
                     span.end_tsc = Some(invariant_tsc::read_tsc());
@@ -280,6 +386,7 @@ mod std_trace {
         }
 
         fn export(&mut self) {
+            self.state = InternalState::Interrupted;
             let guest_start_tsc = self.guest_start_tsc;
             let spans_ptr = self.spans.as_ptr() as u64;
 
@@ -591,6 +698,18 @@ mod std_trace {
             }
         }
         res
+    }
+
+    pub fn import_context(ctx_ptr: u64) {
+        if let Some(w) = GUEST_STATE.get() {
+            if let Some(state) = w.upgrade() {
+                let metadata = unsafe {
+                    // SAFETY: The pointer is assumed to be valid and points to a HashMap
+                    &*(ctx_ptr as *const HashMap<hl::String<32>, hl::Vec<hl::String<32>, 32>>)
+                };
+                state.lock().import_context(metadata);
+            }
+        }
     }
 }
 

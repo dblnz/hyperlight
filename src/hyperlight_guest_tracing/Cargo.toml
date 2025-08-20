@@ -13,9 +13,12 @@ description = """Provides the tracing functionality for the hyperlight guest."""
 heapless = { version = "0.8.0", features = ["serde"] }
 hyperlight-common = { workspace = true, default-features = false }
 hyperlight-guest-tracing-macro = { workspace = true }
+opentelemetry = { version = "0.30.0", default-features = false }
+opentelemetry_sdk = { version = "0.30.0", default-features = false, features = ["serde"] }
 spin = "0.10.0"
 tracing = { version = "0.1.41", default-features = false, features = ["attributes"] }
 tracing-core = { version = "0.1.34", default-features = false }
+tracing-opentelemetry = { version = "0.31.0", default-features = false }
 
 [lints]
 workspace = true

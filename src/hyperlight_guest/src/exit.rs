@@ -124,6 +124,7 @@ pub(crate) unsafe fn out32(port: u16, val: u32) {
     #[cfg(feature = "std_trace_guest")]
     {
         let tbi = hyperlight_guest_tracing::guest_trace_info();
+        let context: u64 = 0;
         if let Some(tbi) = tbi {
             // If tracing is enabled, send the trace batch info along with the OUT action
             unsafe {
@@ -133,9 +134,15 @@ pub(crate) unsafe fn out32(port: u16, val: u32) {
                     in("r8") OutBAction::TraceBatch as u64,
                     in("r9") tbi.spans_ptr,
                     in("r10") tbi.guest_start_tsc,
+                    out("r11") context,
                     options(preserves_flags, nomem, nostack)
                 )
             };
+            unsafe {
+                let guest_handler = GUEST_HANDLE.get().unwrap();
+            }
+            crate::guest_handle::host_comm::
+            hyperlight_guest_tracing::import_context(context);
         } else {
             // If tracing is not enabled, just send the value
             unsafe { asm!("out dx, eax", in("dx") port, in("eax") val, options(preserves_flags, nomem, nostack)) };
