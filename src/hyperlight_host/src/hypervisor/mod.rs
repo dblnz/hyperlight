@@ -22,7 +22,7 @@ use crate::error::HyperlightError::ExecutionCanceledByHost;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
 use crate::metrics::METRIC_GUEST_CANCELLATION;
 #[cfg(feature = "trace_guest")]
-use crate::sandbox::TraceInfo;
+use crate::sandbox::trace::TraceInfo;
 use crate::{HyperlightError, Result, log_then_return};
 
 /// Architecture-specific code for the hypervisor.
