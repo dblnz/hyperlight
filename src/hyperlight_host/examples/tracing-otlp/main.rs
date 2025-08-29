@@ -26,6 +26,9 @@ use std::io::stdin;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{JoinHandle, spawn};
 
+use hyperlight_host::sandbox::SandboxConfiguration;
+#[cfg(gdb)]
+use hyperlight_host::sandbox::config::DebugInfo;
 use hyperlight_host::sandbox::uninitialized::UninitializedSandbox;
 use hyperlight_host::{GuestBinary, Result as HyperlightResult};
 use hyperlight_testing::simple_guest_as_string;
@@ -85,8 +88,10 @@ fn init_tracing_subscriber(
     // Try using the environment otherwise set default filters
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::from_default_env()
-            .add_directive("hyperlight_host=info".parse().unwrap())
-            .add_directive("tracing=info".parse().unwrap())
+            .add_directive("hyperlight-host=debug".parse().unwrap())
+            .add_directive("hyperlight-guest=debug".parse().unwrap())
+            .add_directive("tracing=debug".parse().unwrap())
+            .add_directive("debug".parse().unwrap())
     });
 
     tracing_subscriber::registry()
@@ -110,7 +115,7 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
 
     let should_exit = Arc::new(Mutex::new(false));
 
-    for i in 0..10 {
+    for i in 0..1 {
         let path = hyperlight_guest_path.clone();
         let exit = Arc::clone(&should_exit);
         let handle = spawn(move || -> HyperlightResult<()> {
@@ -125,16 +130,31 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
                 );
                 let _entered = span.enter();
 
+                #[cfg(not(feature = "gdb"))]
+                let mut cfg = SandboxConfiguration::default();
+                #[cfg(feature = "gdb")]
+                let mut cfg = {
+                    let mut cfg = SandboxConfiguration::default();
+                    let debug_info = DebugInfo { port: 8080 };
+                    cfg.set_guest_debug_info(debug_info);
+
+                    cfg
+                };
+
+                cfg.set_stack_size(1024 * 1024 * 10); // 8 MB stack size
+                cfg.set_heap_size(1024 * 1024 * 16); // 8 MB stack size
+                cfg.set_input_data_size(1024 * 1024 * 10);
+
                 // Create a new sandbox.
                 let mut usandbox =
-                    UninitializedSandbox::new(GuestBinary::FilePath(path.clone()), None)?;
+                    UninitializedSandbox::new(GuestBinary::FilePath(path.clone()), Some(cfg))?;
                 usandbox.register_print(fn_writer)?;
 
                 // Initialize the sandbox.
                 let mut multiuse_sandbox = usandbox.evolve()?;
 
                 // Call a guest function 5 times to generate some log entries.
-                for _ in 0..5 {
+                for _ in 0..1 {
                     multiuse_sandbox
                         .call::<String>("Echo", "a".to_string())
                         .unwrap();
@@ -145,14 +165,14 @@ fn run_example(wait_input: bool) -> HyperlightResult<()> {
                 let msg = "Hello, World!!\n".to_string();
 
                 // Call a guest function that calls the HostPrint host function 5 times to generate some log entries.
-                for _ in 0..5 {
+                for _ in 0..1 {
                     multiuse_sandbox
                         .call::<i32>("PrintOutput", msg.clone())
                         .unwrap();
                 }
 
                 // Call a function that gets cancelled by the host function 5 times to generate some log entries.
-                const NUM_CALLS: i32 = 5;
+                const NUM_CALLS: i32 = 1;
                 let barrier = Arc::new(Barrier::new(2));
                 let barrier2 = barrier.clone();
 

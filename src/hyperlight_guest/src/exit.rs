@@ -18,11 +18,36 @@ use core::arch::asm;
 use core::ffi::{CStr, c_char};
 
 use hyperlight_common::outb::OutBAction;
+use tracing::{Span, instrument};
 
 /// Halt the execution of the guest and returns control to the host.
 #[inline(never)]
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub fn halt() {
-    unsafe { asm!("hlt", options(nostack)) }
+    #[cfg(feature = "trace_guest")]
+    {
+        hyperlight_guest_tracing::end_trace();
+        if let Some(tbi) = hyperlight_guest_tracing::guest_trace_info() {
+            // If tracing is not enabled, we can directly halt
+            unsafe {
+                asm!("hlt",
+                    in("r8") OutBAction::TraceBatch as u64,
+                    in("r9") tbi.spans_ptr,
+                    in("r10") tbi.guest_start_tsc,
+                    options(nostack)
+                )
+            };
+        } else {
+            // If tracing is not enabled, we can directly halt
+            unsafe { asm!("hlt", options(nostack)) };
+        }
+    }
+
+    #[cfg(not(feature = "trace_guest"))]
+    {
+        // If tracing is not enabled, we can directly halt
+        unsafe { asm!("hlt", options(nostack)) };
+    }
 }
 
 /// Exits the VM with an Abort OUT action and code 0.
@@ -33,6 +58,8 @@ pub extern "C" fn abort() -> ! {
 
 /// Exits the VM with an Abort OUT action and a specific code.
 pub fn abort_with_code(code: &[u8]) -> ! {
+    #[cfg(feature = "trace_guest")]
+    hyperlight_guest_tracing::end_trace();
     outb(OutBAction::Abort as u16, code);
     outb(OutBAction::Abort as u16, &[0xFF]); // send abort terminator (if not included in code)
     unreachable!()
@@ -43,6 +70,8 @@ pub fn abort_with_code(code: &[u8]) -> ! {
 /// # Safety
 /// This function is unsafe because it dereferences a raw pointer.
 pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_char) -> ! {
+    #[cfg(feature = "trace_guest")]
+    hyperlight_guest_tracing::end_trace();
     unsafe {
         // Step 1: Send abort code (typically 1 byte, but `code` allows flexibility)
         outb(OutBAction::Abort as u16, code);
@@ -62,6 +91,7 @@ pub unsafe fn abort_with_code_and_message(code: &[u8], message_ptr: *const c_cha
 }
 
 /// OUT bytes to the host through multiple exits.
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) fn outb(port: u16, data: &[u8]) {
     // Ensure all tracing data is flushed before sending OUT bytes
     unsafe {
@@ -80,7 +110,31 @@ pub(crate) fn outb(port: u16, data: &[u8]) {
 }
 
 /// OUT function for sending a 32-bit value to the host.
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 pub(crate) unsafe fn out32(port: u16, val: u32) {
+    #[cfg(feature = "trace_guest")]
+    {
+        let tbi = hyperlight_guest_tracing::guest_trace_info();
+        if let Some(tbi) = tbi {
+            // If tracing is enabled, send the trace batch info along with the OUT action
+            unsafe {
+                asm!("out dx, eax",
+                    in("dx") port,
+                    in("eax") val,
+                    in("r8") OutBAction::TraceBatch as u64,
+                    in("r9") tbi.spans_ptr,
+                    in("r10") tbi.guest_start_tsc,
+                    options(preserves_flags, nomem, nostack)
+                )
+            };
+        } else {
+            // If tracing is not enabled, just send the value
+            unsafe {
+                asm!("out dx, eax", in("dx") port, in("eax") val, options(preserves_flags, nomem, nostack))
+            };
+        }
+    }
+    #[cfg(not(feature = "trace_guest"))]
     unsafe {
         asm!("out dx, eax", in("dx") port, in("eax") val, options(preserves_flags, nomem, nostack));
     }

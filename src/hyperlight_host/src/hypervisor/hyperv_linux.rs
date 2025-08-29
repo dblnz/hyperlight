@@ -775,13 +775,8 @@ impl Hypervisor for HypervLinuxDriver {
             Err(mshv_ioctls::MshvError::from(libc::EINTR))
         } else {
             #[cfg(feature = "trace_guest")]
-            if self.trace_info.guest_start_epoch.is_none() {
-                // Store the guest start epoch and cycles to trace the guest execution time
-                crate::debug!("MSHV - Guest Start Epoch set");
-                self.trace_info.guest_start_tsc =
-                    Some(hyperlight_guest_tracing::invariant_tsc::read_tsc());
-                self.trace_info.guest_start_epoch = Some(std::time::Instant::now());
-            }
+            self.trace_info.setup_guest_trace();
+
             // Note: if a `InterruptHandle::kill()` called while this thread is **here**
             // Then the vcpu will run, but we will keep sending signals to this thread
             // to interrupt it until `running` is set to false. The `vcpu_fd::run()` call will

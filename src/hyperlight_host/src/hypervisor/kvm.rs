@@ -694,13 +694,7 @@ impl Hypervisor for KVMDriver {
             Err(kvm_ioctls::Error::new(libc::EINTR))
         } else {
             #[cfg(feature = "trace_guest")]
-            if self.trace_info.guest_start_epoch.is_none() {
-                // Store the guest start epoch and cycles to trace the guest execution time
-                crate::debug!("KVM - Guest Start Epoch set");
-                self.trace_info.guest_start_epoch = Some(std::time::Instant::now());
-                self.trace_info.guest_start_tsc =
-                    Some(hyperlight_guest_tracing::invariant_tsc::read_tsc());
-            }
+            self.trace_info.setup_guest_trace();
 
             // Note: if a `InterruptHandle::kill()` called while this thread is **here**
             // Then the vcpu will run, but we will keep sending signals to this thread
@@ -818,6 +812,21 @@ impl Hypervisor for KVMDriver {
                 HyperlightExit::Unknown(err_msg)
             }
         };
+
+        // If trace is enabled, process the trace batch
+        #[cfg(feature = "trace_guest")]
+        match result {
+            HyperlightExit::Halt()
+            | HyperlightExit::IoOut(_, _, _, _)
+            | HyperlightExit::Mmio(_) => {
+                // If the result is not a halt, io out, mmio or debug exit, we need to process the trace batch
+                let regs = self.read_regs()?;
+                let _ = self
+                    .trace_info
+                    .process_trace_batch(&regs, self.mem_mgr.as_mut().unwrap());
+            }
+            _ => {}
+        }
         Ok(result)
     }
 

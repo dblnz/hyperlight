@@ -49,6 +49,7 @@ const EXTRA_ALLOWED_SYSCALLS_FOR_WRITER_FUNC: &[super::ExtraAllowedSyscall] = &[
     libc::SYS_mprotect,
     #[cfg(mshv)]
     libc::SYS_close,
+    libc::SYS_getrandom,
 ];
 
 #[cfg(any(crashdump, gdb))]
