@@ -926,20 +926,6 @@ impl Hypervisor for HypervLinuxDriver {
             },
         };
 
-        // If trace is enabled, process the trace batch
-        #[cfg(feature = "trace_guest")]
-        match result {
-            HyperlightExit::Halt()
-            | HyperlightExit::IoOut(_, _, _, _)
-            | HyperlightExit::Mmio(_) => {
-                // If the result is not a halt, io out, mmio or debug exit, we need to process the trace batch
-                let regs = self.read_regs()?;
-                let _ = self
-                    .trace_info
-                    .handle_trace_batch(&regs, self.mem_mgr.as_mut().unwrap());
-            }
-            _ => {}
-        }
         Ok(result)
     }
 
@@ -1157,11 +1143,20 @@ impl Hypervisor for HypervLinuxDriver {
         Ok(X86_64Regs::from(self.vcpu_fd.get_regs()?))
     }
 
+    #[cfg(feature = "trace_guest")]
+    fn handle_trace(&mut self) -> Result<Option<opentelemetry::Context>> {
+        let regs = self.read_regs()?;
+        self
+            .trace_info
+            .handle_trace_batch(&regs, self.mem_mgr.as_ref().unwrap())
+    }
+
     #[cfg(feature = "mem_profile")]
     fn trace_info_mut(&mut self) -> &mut TraceInfo {
         &mut self.trace_info
     }
 }
+use opentelemetry::global::BoxedSpan;
 
 impl Drop for HypervLinuxDriver {
     #[instrument(skip_all, parent = Span::current(), level = "Trace")]

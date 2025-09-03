@@ -506,6 +506,7 @@ fn malloc_and_free(function_call: &FunctionCall) -> Result<Vec<u8>> {
     }
 }
 
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
 fn echo(function_call: &FunctionCall) -> Result<Vec<u8>> {
     if let ParameterValue::String(value) = function_call.parameters.clone().unwrap()[0].clone() {
         Ok(get_flatbuffer_result(&*value))

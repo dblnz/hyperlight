@@ -22,7 +22,8 @@ use hyperlight_guest_tracing::{Spans, TraceLevel};
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as _, TraceContextExt, Tracer as _};
 use opentelemetry::{Context, KeyValue, global};
-use tracing::span::Span;
+use rand::rand_core::le;
+use tracing::span::{EnteredSpan, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 #[cfg(feature = "mem_profile")]
 use {
@@ -197,6 +198,38 @@ impl GuestMemProfileProcessor {
     }
 }
 
+pub struct StackedEnteredSpans {
+    pub stack: Vec<EnteredSpan>,
+}
+
+impl StackedEnteredSpans {
+    #[inline(always)]
+    pub fn new_trace(&mut self, ctx: Context) {
+        let span = tracing::trace_span!("call-to-guest");
+        span.set_parent(ctx);
+        println!("span is enabled: {}", span.is_disabled());
+        let entered = span.entered();
+        self.stack.push(entered);
+    }
+
+    pub fn new_host_trace(&mut self, ctx: Context) {
+        let span = tracing::trace_span!("call-to-host");
+        span.set_parent(ctx);
+        let entered = span.entered();
+        self.stack.push(entered);
+    }
+
+    pub fn end_trace(&mut self) {
+        self.stack.clear();
+    }
+
+    pub fn end_host_trace(&mut self) {
+        if let Some(entered) = self.stack.pop() {
+            entered.exit();
+        }
+    }
+}
+
 /// This structure handles the guest tracing information.
 struct GuestTraceProcessor {
     spans: HashMap<u64, BoxedSpan>,
@@ -346,7 +379,7 @@ impl GuestTraceProcessor {
         start_wall: std::time::SystemTime,
         regs: &X86_64Regs,
         mem: &MemMgrWrapper<HostSharedMemory>,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<Context>> {
         // Check if the TSC frequency was already calculated
         if self.tsc_freq.is_none() {
             self.calculate_tsc_freq()?;
@@ -359,6 +392,8 @@ impl GuestTraceProcessor {
         let spans = GuestTraceProcessor::guest_info(regs, mem)?;
         let tracer = global::tracer("guest-tracer");
         let mut spans_to_remove = vec![];
+
+        let mut current_active_span = None;
 
         // Update the spans map
         for s in spans.iter() {
@@ -419,6 +454,8 @@ impl GuestTraceProcessor {
             if let Some(ts) = end_ts {
                 span.end_with_timestamp(ts);
                 spans_to_remove.push(s.id);
+            } else {
+                current_active_span = Some(s.id);
             }
 
             self.spans.insert(s.id, span);
@@ -429,7 +466,13 @@ impl GuestTraceProcessor {
             self.spans.remove(&id);
         }
 
-        Ok(())
+        let res = current_active_span.and_then(|id| {
+            self.spans.get(&id).map(|s| {
+                Context::current().with_remote_span_context(s.span_context().clone())
+            })
+        });
+
+        Ok(res)
     }
 }
 
@@ -473,7 +516,7 @@ impl TraceInfo {
         &mut self,
         regs: &X86_64Regs,
         mem_mgr: &MemMgrWrapper<HostSharedMemory>,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<Context>> {
         self.trace
             .handle_trace_batch(self.epoch, self.wall, regs, mem_mgr)
     }

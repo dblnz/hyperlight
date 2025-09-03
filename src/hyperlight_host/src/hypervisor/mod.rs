@@ -17,6 +17,8 @@ limitations under the License.
 use log::LevelFilter;
 use tracing::{Span, instrument};
 
+use opentelemetry::global::BoxedSpan;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use crate::HyperlightError::StackOverflow;
 use crate::error::HyperlightError::ExecutionCanceledByHost;
 use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags};
@@ -236,6 +238,9 @@ pub(crate) trait Hypervisor: Debug + Send {
     #[cfg(feature = "trace_guest")]
     fn read_regs(&self) -> Result<arch::X86_64Regs>;
 
+    #[cfg(feature = "trace_guest")]
+    fn handle_trace(&mut self) -> Result<Option<opentelemetry::Context>>;
+
     /// Get a mutable reference of the trace info for the guest
     #[cfg(feature = "mem_profile")]
     fn trace_info_mut(&mut self) -> &mut TraceInfo;
@@ -275,8 +280,42 @@ impl VirtualCPU {
         hv: &mut dyn Hypervisor,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<MemMgrWrapper<HostSharedMemory>>>,
     ) -> Result<()> {
+        let mut stack = crate::sandbox::trace::StackedEnteredSpans { stack: Vec::new() };
+        
+        // Initialize the guest trace stack with the current span
+        stack.new_trace(tracing::Span::current().context());
+        let mut first_time = true;
+
         loop {
-            match hv.run() {
+            let result = hv.run();
+
+            if first_time {
+                first_time = false;
+
+            } else {
+                stack.end_host_trace();
+            }
+            #[cfg(feature = "trace_guest")]
+            {
+                // If trace is enabled, process the trace batch
+                match result {
+                    Ok(HyperlightExit::Halt()) => {
+                        let _active_span = hv.handle_trace()?;
+                        stack.stack.clear();
+                    }
+                    Ok(HyperlightExit::IoOut(_, _, _, _))
+                    | Ok(HyperlightExit::Mmio(_)) => {
+                        // If the result is not a halt, io out, mmio or debug exit, we need to process the trace batch
+                        let active_ctx = hv.handle_trace()?;
+                        if let Some(ctx) = active_ctx {
+                            stack.new_host_trace(ctx);
+                        }
+                    }
+                    _ => { }
+                }
+            }
+
+            match result {
                 #[cfg(gdb)]
                 Ok(HyperlightExit::Debug(stop_reason)) => {
                     if let Err(e) = hv.handle_debug(dbg_mem_access_fn.clone(), stop_reason) {
