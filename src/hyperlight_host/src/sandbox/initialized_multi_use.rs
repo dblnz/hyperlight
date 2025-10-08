@@ -59,6 +59,8 @@ static SANDBOX_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub struct MultiUseSandbox {
     /// Unique identifier for this sandbox instance
     id: u64,
+    /// Correlation identifier that originates from UninitializedSandbox
+    correlation_id: String,
     // We need to keep a reference to the host functions, even if the compiler marks it as unused. The compiler cannot detect our dynamic usages of the host function in `HyperlightFunction::call`.
     pub(super) _host_funcs: Arc<Mutex<FunctionRegistry>>,
     pub(crate) mem_mgr: SandboxMemoryManager<HostSharedMemory>,
@@ -83,10 +85,12 @@ impl MultiUseSandbox {
         mgr: SandboxMemoryManager<HostSharedMemory>,
         vm: Box<dyn Hypervisor>,
         dispatch_ptr: RawPtr,
+        correlation_id: String,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> MultiUseSandbox {
         Self {
             id: SANDBOX_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            correlation_id,
             _host_funcs: host_funcs,
             mem_mgr: mgr,
             vm,
@@ -475,6 +479,11 @@ impl MultiUseSandbox {
     pub fn interrupt_handle(&self) -> Arc<dyn InterruptHandle> {
         self.vm.interrupt_handle()
     }
+
+    /// Returns the correlation ID assigned to this sandbox by the host.
+    pub fn correlation_id(&self) -> &str {
+        &self.correlation_id
+    }
 }
 
 impl Callable for MultiUseSandbox {
@@ -509,6 +518,18 @@ mod tests {
     use crate::mem::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, SharedMemory as _};
     use crate::sandbox::SandboxConfiguration;
     use crate::{GuestBinary, HyperlightError, MultiUseSandbox, Result, UninitializedSandbox};
+
+    #[test]
+    fn correlation_id_is_generated_and_propagated() {
+        let path = simple_guest_as_string().unwrap();
+        let u = UninitializedSandbox::new(GuestBinary::FilePath(path), None).unwrap();
+        let id_before = u.correlation_id().to_string();
+        assert!(!id_before.is_empty());
+
+        let s: MultiUseSandbox = u.evolve().unwrap();
+        let id_after = s.correlation_id().to_string();
+        assert_eq!(id_before, id_after);
+    }
 
     /// Make sure input/output buffers are properly reset after guest call (with host call)
     #[test]

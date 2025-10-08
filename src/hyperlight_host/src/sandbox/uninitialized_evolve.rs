@@ -96,6 +96,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         hshm,
         vm,
         dispatch_ptr,
+        u_sbox.correlation_id,
         #[cfg(gdb)]
         dbg_mem_wrapper,
     ))
