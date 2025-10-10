@@ -291,14 +291,29 @@ impl MultiUseSandbox {
     ) -> Result<Output> {
         // Reset snapshot since we are mutating the sandbox state
         self.snapshot = None;
-        maybe_time_and_emit_guest_call(func_name, || {
+        // Emit start log
+        crate::structured_log::info!(
+            "Calling guest function",
+            self.correlation_id.as_str(),
+            func = func_name,
+        );
+        let result = maybe_time_and_emit_guest_call(func_name, || {
             let ret = self.call_guest_function_by_name_no_reset(
                 func_name,
                 Output::TYPE,
                 args.into_value(),
             );
             Output::from_value(ret?)
-        })
+        });
+        if result.is_ok() {
+            crate::structured_log::info!(
+                "Guest function returned",
+                self.correlation_id.as_str(),
+                status = "success",
+                func = func_name,
+            );
+        }
+        result
     }
 
     /// Maps a region of host memory into the sandbox address space.

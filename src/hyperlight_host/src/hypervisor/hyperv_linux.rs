@@ -295,7 +295,10 @@ pub(crate) fn is_hypervisor_present() -> bool {
     match Mshv::new() {
         Ok(_) => true,
         Err(_) => {
-            log::info!("MSHV is not available on this system");
+            crate::structured_log::info!(
+                "MSHV is not available on this system",
+                hv = "mshv",
+            );
             false
         }
     }

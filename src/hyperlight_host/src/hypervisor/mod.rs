@@ -220,7 +220,10 @@ pub(crate) trait Hypervisor: Debug + Send {
             val.split(',').find(|s| !s.contains("=")).unwrap_or("")
         };
 
-        log::info!("Determined guest log level: {}", level);
+        crate::structured_log::info!(
+            "Determined guest log level",
+            level = level,
+        );
         // Convert the log level string to a LevelFilter
         // If no value is found, default to Error
         LevelFilter::from_str(level).unwrap_or(LevelFilter::Error) as u32

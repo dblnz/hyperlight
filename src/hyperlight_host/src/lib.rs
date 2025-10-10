@@ -76,6 +76,8 @@ pub mod metrics;
 /// outside this file. Types from this module needed for public consumption are
 /// re-exported below.
 pub mod sandbox;
+/// Prototype helpers to emit standardized log lines using the `log` crate
+pub mod structured_log;
 #[cfg(seccomp)]
 pub(crate) mod seccomp;
 /// Signal handling for Linux
@@ -146,50 +148,46 @@ macro_rules! debug {
 static LOG_ONCE: Once = Once::new();
 
 #[cfg(feature = "build-metadata")]
-pub(crate) fn log_build_details() {
-    use log::info;
+pub(crate) fn log_build_details(correlation_id: &str) {
     LOG_ONCE.call_once(|| {
-        info!("Package name: {}", built_info::PKG_NAME);
-        info!("Package version: {}", built_info::PKG_VERSION);
-        info!("Package features: {:?}", built_info::FEATURES);
-        info!("Target triple: {}", built_info::TARGET);
-        info!("Optimization level: {}", built_info::OPT_LEVEL);
-        info!("Profile: {}", built_info::PROFILE);
-        info!("Debug: {}", built_info::DEBUG);
-        info!("Rustc: {}", built_info::RUSTC);
-        info!("Built at: {}", built_info::BUILT_TIME_UTC);
-        match built_info::CI_PLATFORM.unwrap_or("") {
-            "" => info!("Not built on  a CI platform"),
-            other => info!("Built on : {}", other),
-        }
-        match built_info::GIT_COMMIT_HASH.unwrap_or("") {
-            "" => info!("No git commit hash found"),
-            other => info!("Git commit hash: {}", other),
-        }
-
-        let git = match built_info::GIT_HEAD_REF.unwrap_or("") {
-            "" => {
-                info!("No git head ref found");
+        crate::structured_log::info!(
+            "Build details",
+            correlation_id,
+            pkg_name = built_info::PKG_NAME,
+            pkg_version = built_info::PKG_VERSION,
+            features = format!("{:?}", built_info::FEATURES),
+            target = built_info::TARGET,
+            opt_level = built_info::OPT_LEVEL,
+            profile = built_info::PROFILE,
+            debug = built_info::DEBUG,
+            rustc = built_info::RUSTC,
+            built_at = built_info::BUILT_TIME_UTC,
+            ci_platform = if let Some(platform) = built_info::CI_PLATFORM {
+                platform
+            } else {
+                ""
+            },
+            git_hash = if let Some(git_hash) = built_info::GIT_COMMIT_HASH {
+                git_hash
+            } else {
+                ""
+            },
+            git_version = if let Some(git_version) = built_info::GIT_VERSION {
+                git_version
+            } else {
+                ""
+            },
+            git_head_ref = if let Some(git_head_ref) = built_info::GIT_HEAD_REF {
+                git_head_ref
+            } else {
+                ""
+            },
+            git_dirty = if let Some(dirty) = built_info::GIT_DIRTY {
+                dirty
+            } else {
                 false
-            }
-            other => {
-                info!("Git head ref: {}", other);
-                true
-            }
-        };
-        match built_info::GIT_VERSION.unwrap_or("") {
-            "" => info!("No git version found"),
-            other => info!("Git version: {}", other),
-        }
-        match built_info::GIT_DIRTY.unwrap_or(false) {
-            true => info!("Repo had uncommitted changes"),
-            false => {
-                if git {
-                    info!("Repo had no uncommitted changes")
-                } else {
-                    info!("No git repo found")
-                }
-            }
-        }
+            },
+
+        );
     });
 }

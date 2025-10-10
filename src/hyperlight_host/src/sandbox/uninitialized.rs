@@ -170,8 +170,11 @@ impl UninitializedSandbox {
         env: impl Into<GuestEnvironment<'a, 'b>>,
         cfg: Option<SandboxConfiguration>,
     ) -> Result<Self> {
+        // Generate a correlation ID for this sandbox
+        let correlation_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
+
         #[cfg(feature = "build-metadata")]
-        log_build_details();
+        log_build_details(&correlation_id);
 
         // hyperlight is only supported on Windows 11 and Windows Server 2022 and later
         #[cfg(target_os = "windows")]
@@ -236,10 +239,7 @@ impl UninitializedSandbox {
             mem_mgr_wrapper.write_init_data(blob.data)?;
         }
 
-    let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
-
-    // Generate a correlation ID for this sandbox
-    let correlation_id = uuid::Uuid::new_v4().as_hyphenated().to_string();
+        let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
 
         let mut sandbox = Self {
             host_funcs,
@@ -255,7 +255,12 @@ impl UninitializedSandbox {
         // If we were passed a writer for host print register it otherwise use the default.
         sandbox.register_print(default_writer_func)?;
 
-        crate::debug!("Sandbox created:  {:#?}", sandbox);
+        // Emit a structured log that a sandbox was created, with correlation id
+        crate::structured_log::info!(
+            "Sandbox created",
+            sandbox.correlation_id.as_str(),
+            status = "",
+        );
 
         Ok(sandbox)
     }
