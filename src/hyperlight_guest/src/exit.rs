@@ -34,15 +34,18 @@ pub fn halt() {
         // If tracing is enabled, we need to pass the trace batch info
         // along with the halt instruction so the host can retrieve it
         if let Some(tbi) = hyperlight_guest_tracing::guest_trace_info() {
+            let ptr = tbi.serialized_data.as_ptr() as u64;
+            let len = tbi.serialized_data.len() as u64;
+            // TODO: This data needs to be dropped somehow, this drop alters the data
+            drop(tbi); // free the trace batch info
             unsafe {
                 asm!("hlt",
                     in("r8") OutBAction::TraceBatch as u64,
-                    in("r9") tbi.serialized_data.as_ptr() as u64,
-                    in("r10") tbi.serialized_data.len() as u64,
+                    in("r9") ptr,
+                    in("r10") len,
                     options(nostack)
                 )
             };
-            hyperlight_guest_tracing::clean_trace_state();
         } else {
             // If tracing is not enabled, we can directly halt
             unsafe { asm!("hlt", options(nostack)) };
