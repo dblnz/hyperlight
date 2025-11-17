@@ -143,7 +143,7 @@ impl GuestState {
     }
 
     /// Returns information about the information needed by the host to read the spans.
-    pub(crate) fn guest_trace_info(&mut self) -> TraceBatchInfo {
+    pub(crate) fn guest_trace_info(&self) -> TraceBatchInfo {
         let serialized_data: Vec<u8> = Vec::from(&self.data);
         TraceBatchInfo { serialized_data }
     }
