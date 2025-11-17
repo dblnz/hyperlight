@@ -337,7 +337,7 @@ fuzz_memory_limit := "4096"
 
 # Fuzzes the given target
 fuzz fuzz-target:
-    if [ "{{ fuzz-target }}" = "fuzz_guest_trace" ]; then just fuzz-trace; else cargo +nightly fuzz run {{ fuzz-target }} --release -- -rss_limit_mb={{ fuzz_memory_limit }}
+    if [ "{{ fuzz-target }}" = "fuzz_guest_trace" ]; then just fuzz-trace; else cargo +nightly fuzz run {{ fuzz-target }} --release -- -rss_limit_mb={{ fuzz_memory_limit }}; fi
 
 # Fuzzes the given target. Stops after `max_time` seconds
 fuzz-timed fuzz-target max_time:
