@@ -75,9 +75,10 @@ mod trace {
     /// Sets the guset starting timestamp reported to the host on a VMExit
     pub fn set_start_tsc(guest_start_tsc: u64) {
         if let Some(w) = GUEST_STATE.get()
-            && let Some(state) = w.upgrade()
+            && let Some(state_mutex) = w.upgrade()
+            && let Some(mut state) = state_mutex.try_lock()
         {
-            state.lock().set_start_tsc(guest_start_tsc);
+            state.set_start_tsc(guest_start_tsc);
         }
     }
 
@@ -89,9 +90,10 @@ mod trace {
     /// for cleaning on the next access.
     pub fn end_trace() {
         if let Some(w) = GUEST_STATE.get()
-            && let Some(state) = w.upgrade()
+            && let Some(state_mutex) = w.upgrade()
+            && let Some(mut state) = state_mutex.try_lock()
         {
-            state.lock().end_trace();
+            state.end_trace();
         }
     }
 
@@ -100,19 +102,23 @@ mod trace {
     /// are still active (in the stack) and remove all other spans and events.
     pub fn clean_trace_state() {
         if let Some(w) = GUEST_STATE.get()
-            && let Some(state) = w.upgrade()
+            && let Some(state_mutex) = w.upgrade()
+            && let Some(mut state) = state_mutex.try_lock()
         {
-            state.lock().clean();
+            state.clean();
         }
     }
 
     /// Returns information about the current trace state needed by the host to read the spans.
+    /// NOTE: If unable to lock the state, likely due to concurrent access, we skip retrieving the info.
+    /// This is to avoid deadlocks in the guest.
     pub fn guest_trace_info() -> Option<TraceBatchInfo> {
         let mut res = None;
         if let Some(w) = GUEST_STATE.get()
-            && let Some(state) = w.upgrade()
+            && let Some(state_mutex) = w.upgrade()
+            && let Some(state) = state_mutex.try_lock()
         {
-            res = Some(state.lock().guest_trace_info());
+            res = Some(state.guest_trace_info());
         }
         res
     }

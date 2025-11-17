@@ -49,27 +49,87 @@ impl Subscriber for GuestSubscriber {
     }
 
     fn new_span(&self, attrs: &Attributes<'_>) -> Id {
-        self.state.lock().new_span(attrs)
+        if let Some(mut state) = self.state.try_lock() {
+            state.new_span(attrs)
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // The state is used in other places to serialize guest tracing data,
+            // to check whether tracing is enabled, etc.
+            // In case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a span/log).
+            panic!("GuestSubscriber: unable to lock state in `new_span`");
+        }
     }
 
     fn record(&self, id: &Id, values: &Record<'_>) {
-        self.state.lock().record(id, values)
+        if let Some(mut state) = self.state.try_lock() {
+            state.record(id, values)
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // The state is used in other places to serialize guest tracing data,
+            // to check whether tracing is enabled, etc.
+            // In case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a span/log).
+            panic!("GuestSubscriber: unable to lock state in `record`");
+        }
     }
 
     fn event(&self, event: &Event<'_>) {
-        self.state.lock().event(event)
+        if let Some(mut state) = self.state.try_lock() {
+            state.event(event)
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // The state is used in other places to serialize guest tracing data,
+            // to check whether tracing is enabled, etc.
+            // In case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a span/log).
+            panic!("GuestSubscriber: unable to lock state in `event`");
+        }
     }
 
     fn enter(&self, id: &Id) {
-        self.state.lock().enter(id)
+        if let Some(mut state) = self.state.try_lock() {
+            state.enter(id)
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // The state is used in other places to serialize guest tracing data,
+            // to check whether tracing is enabled, etc.
+            // In case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a span/log).
+            panic!("GuestSubscriber: unable to lock state in `enter`");
+        }
     }
 
     fn exit(&self, id: &Id) {
-        self.state.lock().exit(id)
+        if let Some(mut state) = self.state.try_lock() {
+            state.exit(id)
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // The state is used in other places to serialize guest tracing data,
+            // to check whether tracing is enabled, etc.
+            // In case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a span/log).
+            panic!("GuestSubscriber: unable to lock state in `exit`");
+        }
     }
 
     fn try_close(&self, id: Id) -> bool {
-        self.state.lock().try_close(id)
+        if let Some(mut state) = self.state.try_lock() {
+            state.try_close(id)
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // The state is used in other places to serialize guest tracing data,
+            // to check whether tracing is enabled, etc.
+            // In case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a span/log).
+            panic!("GuestSubscriber: unable to lock state in `try_close`");
+        }
     }
 
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {
