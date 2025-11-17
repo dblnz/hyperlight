@@ -1105,6 +1105,14 @@ pub extern "C" fn hyperlight_main() {
     );
     register_function(call_host_then_spin_def);
 
+    let fuzz_guest_trace_def = GuestFunctionDefinition::new(
+        "FuzzGuestTrace".to_string(),
+        Vec::from(&[ParameterType::UInt, ParameterType::String]),
+        ReturnType::UInt,
+        fuzz_guest_trace as usize,
+    );
+    register_function(fuzz_guest_trace_def);
+
     let print_using_printf_def = GuestFunctionDefinition::new(
         "PrintUsingPrintf".to_string(),
         Vec::from(&[ParameterType::String]),
@@ -1662,6 +1670,28 @@ fn call_host_then_spin(function_call: &FunctionCall) -> Result<Vec<u8>> {
             "Invalid parameters passed to call_host_then_spin".to_string(),
         ))
     }
+}
+
+#[instrument(skip_all, parent = Span::current(), level= "Trace")]
+fn fuzz_traced_function(depth: u32, max_depth: u32, msg: &str) -> u32 {
+    if depth < max_depth {
+        log::info!("{}", msg);
+        return fuzz_traced_function(depth + 1, max_depth, msg) + 1;
+    }
+    return 0;
+}
+
+fn fuzz_guest_trace(function_call: &FunctionCall) -> Result<Vec<u8>> {
+    let mut result = 0;
+
+    if let (ParameterValue::UInt(max_depth), ParameterValue::String(msg)) = (
+        function_call.parameters.clone().unwrap()[0].clone(),
+        function_call.parameters.clone().unwrap()[1].clone(),
+    ) {
+        result = fuzz_traced_function(0, max_depth, &msg);
+    }
+
+    Ok(get_flatbuffer_result(result))
 }
 
 // Interprets the given guest function call as a host function call and dispatches it to the host.
