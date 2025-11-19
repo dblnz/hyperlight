@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{
-    GuestEvent, GuestTraceData, KeyValue as GuestKeyValue,
+    GuestEvent, GuestEventsDeserializer, KeyValue as GuestKeyValue,
 };
 use hyperlight_common::outb::OutBAction;
 use opentelemetry::global::BoxedSpan;
@@ -35,7 +35,7 @@ use crate::{HyperlightError, Result, new_error};
 
 /// Type that helps get the data from the guest provided the registers and memory access
 struct TraceBatch {
-    data: GuestTraceData,
+    events: Vec<GuestEvent>,
 }
 
 impl
@@ -73,7 +73,7 @@ impl
         // The reason for using `with_exclusivity` is to ensure that we have exclusive access
         // and avoid allocating new memory, which needs to be correctly aligned for the
         // flatbuffer parsing.
-        let trace_data = mem_mgr.shared_mem.with_exclusivity(|mem| {
+        let events = mem_mgr.shared_mem.with_exclusivity(|mem| {
             let buf_slice = mem
                 .as_slice()
                 // Adjust the pointer to be relative to the base address of the sandbox memory
@@ -88,22 +88,15 @@ impl
                     new_error!("Failed to get guest trace batch slice from guest memory")
                 })?;
 
-            // Parse the slice into a GuestTraceData structure
-            let trace_data: GuestTraceData = buf_slice.try_into().map_err(|e| {
-                tracing::error!(
-                    "Failed to parse guest trace data from guest memory: {:?}",
-                    e
-                );
-                new_error!(
-                    "Failed to parse guest trace data from guest memory: {:?}",
-                    e
-                )
+            let events = GuestEventsDeserializer::deserialize(buf_slice).map_err(|e| {
+                tracing::error!("Failed to deserialize guest trace events: {:?}", e);
+                new_error!("Failed to deserialize guest trace events: {:?}", e)
             })?;
 
-            Ok::<GuestTraceData, HyperlightError>(trace_data)
+            Ok::<Vec<GuestEvent>, HyperlightError>(events)
         })??;
 
-        Ok(TraceBatch { data: trace_data })
+        Ok(TraceBatch { events })
     }
 }
 
@@ -227,26 +220,43 @@ impl TraceContext {
         regs: &CommonRegisters,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
     ) -> Result<()> {
-        if self.tsc_freq.is_none() {
-            self.calculate_tsc_freq()?;
-        }
-
         // Get the guest sent info
         let trace_batch = TraceBatch::try_from((regs, mem_mgr))?;
-        let trace_batch = trace_batch.data;
 
-        self.handle_trace_impl(trace_batch)
+        self.handle_trace_impl(trace_batch.events)
     }
 
-    fn handle_trace_impl(&mut self, trace_data: GuestTraceData) -> Result<()> {
+    fn handle_trace_impl(&mut self, events: Vec<GuestEvent>) -> Result<()> {
         let tracer = global::tracer("guest-tracer");
+
+        println!("Handling guest trace with {} events", events.len());
 
         // Stack to keep track of open spans
         let mut spans_stack = vec![];
 
         // Process each event
-        for ev in trace_data.events.into_iter() {
+        for ev in events.into_iter() {
             match ev {
+                GuestEvent::GuestStart { tsc } => {
+                    // Move to GuestStart
+                    if self.tsc_freq.is_none() {
+                        self.calculate_tsc_freq()?;
+                    }
+                    self.start_tsc = Some(tsc);
+                }
+                GuestEvent::EditSpan { id, fields } => {
+                    // Edit existing span attributes
+                    if let Some(span) = self.guest_spans.get_mut(&id) {
+                        for GuestKeyValue { key, value } in fields.iter() {
+                            span.set_attribute(KeyValue::new(
+                                key.as_str().to_string(),
+                                value.as_str().to_string(),
+                            ));
+                        }
+                    } else {
+                        tracing::warn!("Tried to edit non-existing guest span with id {}", id);
+                    }
+                }
                 GuestEvent::OpenSpan {
                     id,
                     parent_id,
@@ -255,9 +265,11 @@ impl TraceContext {
                     tsc,
                     fields,
                 } => {
+                    let start_tsc = self.start_tsc.ok_or(new_error!(
+                        "Guest start TSC not set before opening guest span"
+                    ))?;
                     // Calculate start timestamp
-                    let start_ts =
-                        self.calculate_guest_time_relative_to_host(trace_data.start_tsc, tsc)?;
+                    let start_ts = self.calculate_guest_time_relative_to_host(start_tsc, tsc)?;
 
                     // Determine parent context
                     // Priority:
@@ -301,10 +313,12 @@ impl TraceContext {
                     spans_stack.push(id);
                 }
                 GuestEvent::CloseSpan { id, tsc } => {
+                    let start_tsc = self.start_tsc.ok_or(new_error!(
+                        "Guest start TSC not set before opening guest span"
+                    ))?;
                     // Remove the span and end it
                     if let Some(mut span) = self.guest_spans.remove(&id) {
-                        let end_ts =
-                            self.calculate_guest_time_relative_to_host(trace_data.start_tsc, tsc)?;
+                        let end_ts = self.calculate_guest_time_relative_to_host(start_tsc, tsc)?;
                         span.end_with_timestamp(end_ts);
 
                         // The span ids should be closed in order
@@ -323,8 +337,10 @@ impl TraceContext {
                     tsc,
                     fields,
                 } => {
-                    let ts =
-                        self.calculate_guest_time_relative_to_host(trace_data.start_tsc, tsc)?;
+                    let start_tsc = self.start_tsc.ok_or(new_error!(
+                        "Guest start TSC not set before opening guest span"
+                    ))?;
+                    let ts = self.calculate_guest_time_relative_to_host(start_tsc, tsc)?;
 
                     // Add the event to the parent span
                     // It should always have a parent span

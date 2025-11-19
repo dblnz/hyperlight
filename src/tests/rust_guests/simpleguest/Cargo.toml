@@ -16,3 +16,10 @@ default = []
 trace_guest = ["hyperlight-guest-bin/trace_guest", "hyperlight-guest/trace_guest", "hyperlight-guest-tracing/trace"]
 mem_profile = ["hyperlight-common/mem_profile", "hyperlight-guest-bin/mem_profile"]
 
+[profile.release]
+opt-level = 0
+debug = "full"
+
+[profile.dev]
+opt-level = 0
+debug = "full"

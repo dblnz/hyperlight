@@ -37,8 +37,7 @@ mod visitor;
 pub use state::TraceBatchInfo;
 #[cfg(feature = "trace")]
 pub use trace::{
-    clean_trace_state, end_trace, guest_trace_info, init_guest_tracing, is_trace_enabled,
-    set_start_tsc,
+    end_trace, flush, init_guest_tracing, is_trace_enabled, new_call, reset, serialized_data,
 };
 
 /// This module is gated because some of these types are also used on the host, but we want
@@ -50,7 +49,6 @@ mod trace {
 
     use spin::Mutex;
 
-    use super::*;
     use crate::state::GuestState;
     use crate::subscriber::GuestSubscriber;
 
@@ -72,16 +70,6 @@ mod trace {
         let _ = tracing_core::dispatcher::set_global_default(tracing_core::Dispatch::new(sub));
     }
 
-    /// Sets the guset starting timestamp reported to the host on a VMExit
-    pub fn set_start_tsc(guest_start_tsc: u64) {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
-            && let Some(mut state) = state_mutex.try_lock()
-        {
-            state.set_start_tsc(guest_start_tsc);
-        }
-    }
-
     /// Ends the current trace by ending all active spans in the
     /// internal state and storing the end timestamps.
     ///
@@ -97,30 +85,57 @@ mod trace {
         }
     }
 
-    /// Cleans the internal trace state by removing closed spans and events.
-    /// This ensures that after a VM exit, we keep the spans that
-    /// are still active (in the stack) and remove all other spans and events.
-    pub fn clean_trace_state() {
+    /// Flushes the current trace data to prepare it for reading by the host.
+    pub fn flush() {
         if let Some(w) = GUEST_STATE.get()
             && let Some(state_mutex) = w.upgrade()
             && let Some(mut state) = state_mutex.try_lock()
         {
-            state.clean();
+            state.flush();
+        }
+    }
+
+    /// Resets the internal trace state for a new guest function call.
+    /// This clears any existing spans/events from previous calls ensuring a clean state.
+    pub fn new_call(guest_start_tsc: u64) {
+        if let Some(w) = GUEST_STATE.get()
+            && let Some(state_mutex) = w.upgrade()
+            && let Some(mut state) = state_mutex.try_lock()
+        {
+            state.new_call(guest_start_tsc);
+        }
+    }
+
+    /// Cleans the internal trace state by removing closed spans and events.
+    /// This ensures that after a VM exit, we keep the spans that
+    /// are still active (in the stack) and remove all other spans and events.
+    pub fn reset() {
+        if let Some(w) = GUEST_STATE.get()
+            && let Some(state_mutex) = w.upgrade()
+            && let Some(mut state) = state_mutex.try_lock()
+        {
+            state.reset();
         }
     }
 
     /// Returns information about the current trace state needed by the host to read the spans.
     /// NOTE: If unable to lock the state, likely due to concurrent access, we skip retrieving the info.
     /// This is to avoid deadlocks in the guest.
-    pub fn guest_trace_info() -> Option<TraceBatchInfo> {
-        let mut res = None;
+    /// Returns None if state is locked or there is no serialized data, otherwise returns Some with
+    /// pointer and length of the serialized data slice.
+    pub fn serialized_data() -> Option<(u64, u64)> {
         if let Some(w) = GUEST_STATE.get()
             && let Some(state_mutex) = w.upgrade()
             && let Some(state) = state_mutex.try_lock()
         {
-            res = Some(state.guest_trace_info());
+            if let Some(slice) = state.serialized_data() {
+                Some((slice.as_ptr() as u64, slice.len() as u64))
+            } else {
+                None
+            }
+        } else {
+            None
         }
-        res
     }
 
     /// Returns true if tracing is enabled (the guest tracing state is initialized).

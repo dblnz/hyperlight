@@ -2,11 +2,27 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.nixpkgs-mozilla.url = "github:mozilla/nixpkgs-mozilla/master";
   outputs = { self, nixpkgs, nixpkgs-mozilla, ... } @ inputs:
+    let
+      # Use flatbuffers 25.9.23 until nixpkgs updates it
+      flatbuffersOverlay = final: prev: let
+        version = "25.9.23";
+      in {
+          flatbuffers = prev.flatbuffers.overrideAttrs (old: {
+          inherit version;
+          src = prev.fetchFromGitHub {
+              owner = "google";
+              repo = "flatbuffers";
+              rev = "v${version}";
+              hash = "sha256-A9nWfgcuVW3x9MDFeviCUK/oGcWJQwadI8LqNR8BlQw=";
+          };
+          });
+      };
+    in
     {
       devShells.x86_64-linux.default =
         let pkgs = import nixpkgs {
               system = "x86_64-linux";
-              overlays = [ (import (nixpkgs-mozilla + "/rust-overlay.nix")) ];
+              overlays = [ (import (nixpkgs-mozilla + "/rust-overlay.nix")) flatbuffersOverlay ];
             };
         in with pkgs; let
           # Work around the nixpkgs-mozilla equivalent of
@@ -42,17 +58,15 @@
           # for rustfmt and old toolchains to verify MSRV
           toolchains = lib.mapAttrs (_: customisedRustChannelOf) {
             stable = {
-              # Stay on 1.87 for development due to the
-              # quickly-reversed default enablement of
-              # #[warn(clippy::uninlined_format_args)]
-              date = "2025-05-15";
+              # Stay on 1.89
+              date = "2025-08-07";
               channel = "stable";
-              sha256 = "sha256-KUm16pHj+cRedf8vxs/Hd2YWxpOrWZ7UOrwhILdSJBU=";
+              sha256 = "sha256-+9FmLhAOezBZCOziO0Qct1NOrfpjNsXxc/8I0c7BdKE=";
             };
             nightly = {
-              date = "2025-07-29";
+              date = "2025-08-07";
               channel = "nightly";
-              sha256 = "sha256-6D2b7glWC3jpbIGCq6Ta59lGCKN9sTexhgixH4Y7Nng=";
+              sha256 = "sha256-jX+pQa3zzuCnR1fRZ0Z4L2hXLP3JoGOcpbL4vI853EA=";
             };
             "1.85" = {
               date = "2025-02-20";
@@ -63,6 +77,11 @@
               date = "2025-04-03";
               channel = "stable";
               sha256 = "sha256-X/4ZBHO3iW0fOenQ3foEvscgAPJYl2abspaBThDOukI=";
+            };
+            "1.91.1" = {
+              date = "2025-11-10";
+              channel = "stable";
+              sha256 = "sha256-SDu4snEWjuZU475PERvu+iO50Mi39KVjqCeJeNvpguU=";
             };
           };
 
@@ -107,28 +126,31 @@
           pname = "hyperlight";
           version = "0.0.0";
           src = lib.cleanSource ./.;
-          cargoHash = "sha256-hoeJEBdxaoyLlhQQ4X4Wk5X1QVtQ7RRQYaxkiGg8rWA=";
+          cargoHash = "sha256-7Op6f0MWTAM4ElARNnypz72BxUnKcvrUafKDKGaxqL8=";
 
           nativeBuildInputs = [
             azure-cli
-            just
+            cmake
             dotnet-sdk_9
-            llvmPackages_18.llvm
-            gh
-            lld
-            valgrind
-            pkg-config
             ffmpeg
-            mkvtoolnix
-            wasm-tools
-            jq
-            jaq
+            flatbuffers
             gdb
+            gh
+            just
+            jaq
+            jq
+            lld
+            llvmPackages_18.llvm
+            mkvtoolnix
+            pkg-config
+            valgrind
+            wasm-tools
+            zlib
           ];
           buildInputs = [
-            pango
             cairo
             openssl
+            pango
           ];
 
           auditable = false;
@@ -142,6 +164,7 @@
           # really sure that it overrides the real cargo.
           shellHook = ''
             export PATH="${fake-rustup}/bin:$PATH"
+            export LD_LIBRARY_PATH=${stdenv.cc.cc.lib}/lib:${zlib}/lib:$LD_LIBRARY_PATH
           '';
         }).overrideAttrs(oA: {
           hardeningDisable = [ "all" ];

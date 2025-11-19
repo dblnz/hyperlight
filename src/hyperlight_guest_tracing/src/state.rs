@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{GuestEvent, GuestTraceData};
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{GuestEvent, GuestEventsSerializer};
 use hyperlight_common::outb::OutBAction;
 use tracing_core::Event;
 use tracing_core::span::{Attributes, Id, Record};
@@ -33,12 +33,10 @@ pub struct TraceBatchInfo {
 
 /// Internal state of the tracing subscriber
 pub(crate) struct GuestState {
-    /// Whether we need to cleanup the state on next access
-    cleanup_needed: bool,
+    /// Builder that serializes data in place
+    serializer: GuestEventsSerializer<fn(&[u8])>,
     /// Next span ID to allocate
     next_id: AtomicU64,
-    /// Trace information that is exchanged with the host
-    data: GuestTraceData,
     /// Stack of active spans
     stack: Vec<u64>,
 }
@@ -46,25 +44,39 @@ pub(crate) struct GuestState {
 /// TODO: Change these constants to be configurable at runtime by the guest
 /// Maybe use a weak symbol that the guest can override at link time?
 ///
-/// Pre-calculated capacity for the events vector
+/// Pre-calculated capacity for the serialized events buffer
 /// This is to avoid reallocations in the guest
-/// We allocate space for both spans and events
-const EVENTS_VEC_CAPACITY: usize = 30;
-/// Maximum number of spans that can be active at the same time
-/// This is half of the events capacity because there are two events per span
-/// (open and close)
-const MAX_NO_OF_SPANS: usize = EVENTS_VEC_CAPACITY / 2;
+const SERIALIZER_CAPACITY: usize = 4096;
+/// Start with a stack capacity for active spans
+const ACTIVE_SPANS_CAPACITY: usize = 64;
+
+/// Triggers a VM exit to flush the current events to the host.
+fn send_to_host(data: &[u8]) {
+    unsafe {
+        core::arch::asm!("out dx, al",
+            // Port value for tracing
+            in("dx") OutBAction::TraceBatch as u16,
+            // Additional magic number to identify the action
+            in("r8") OutBAction::TraceBatch as u64,
+            in("r9") data.as_ptr() as u64,
+            in("r10") data.len() as u64,
+        );
+    }
+}
 
 impl GuestState {
     pub(crate) fn new(guest_start_tsc: u64) -> Self {
+        let mut serializer =
+            GuestEventsSerializer::new(SERIALIZER_CAPACITY, send_to_host as fn(&[u8]));
+
+        serializer.serialize_event(&GuestEvent::GuestStart {
+            tsc: guest_start_tsc,
+        });
+
         Self {
-            cleanup_needed: false,
+            serializer,
             next_id: AtomicU64::new(1),
-            data: GuestTraceData {
-                start_tsc: guest_start_tsc,
-                events: Vec::with_capacity(EVENTS_VEC_CAPACITY),
-            },
-            stack: Vec::with_capacity(MAX_NO_OF_SPANS),
+            stack: Vec::with_capacity(ACTIVE_SPANS_CAPACITY),
         }
     }
 
@@ -78,44 +90,33 @@ impl GuestState {
         (n, Id::from_u64(n))
     }
 
-    /// Cleanup internal state by removing closed spans and events
-    /// This ensures that after a VM exit, we keep the spans that
-    /// are still active (in the stack) and remove all other spans and events.
-    pub fn clean(&mut self) {
-        // Remove all events
-        self.data.events.clear();
-    }
+    /// Flush the current trace by ending all spans and sending the data to the host
+    /// This expects at most multiple calls to outb to send the data:
+    /// - in case there is not enough space to close all spans
+    /// - one to send the final data left
+    pub(crate) fn flush(&mut self) {
+        // End all spans which serializes them and might require multiple outb calls
+        self.end_trace();
 
-    #[inline(always)]
-    fn verify_and_clean(&mut self) {
-        if self.cleanup_needed {
-            self.clean();
-            self.cleanup_needed = false;
+        // Get serialized data
+        let data = self.serializer.finish();
+
+        // Send to host if there is data left
+        if !data.is_empty() {
+            send_to_host(data);
         }
     }
 
-    /// Triggers a VM exit to flush the current spans to the host.
-    /// This also clears the internal state to start fresh.
-    fn send_to_host(&mut self) {
-        let tb = self.guest_trace_info();
-
-        unsafe {
-            core::arch::asm!("out dx, al",
-                // Port value for tracing
-                in("dx") OutBAction::TraceBatch as u16,
-                // Additional magic number to identify the action
-                in("r8") OutBAction::TraceBatch as u64,
-                in("r9") tb.serialized_data.as_ptr() as u64,
-                in("r10") tb.serialized_data.len() as u64,
-            );
-        }
-
-        self.clean();
+    pub(crate) fn new_call(&mut self, start_tsc: u64) {
+        self.serializer.reset();
+        self.serializer
+            .serialize_event(&GuestEvent::GuestStart { tsc: start_tsc });
     }
 
-    /// Set a new guest start tsc
-    pub(crate) fn set_start_tsc(&mut self, guest_start_tsc: u64) {
-        self.data.start_tsc = guest_start_tsc;
+    /// Reset the trace state, clearing all existing spans and events
+    /// This is called after the trace has been flushed to the host
+    pub(crate) fn reset(&mut self) {
+        self.serializer.reset();
     }
 
     /// Closes the trace by ending all spans
@@ -128,29 +129,19 @@ impl GuestState {
                 id,
                 tsc: invariant_tsc::read_tsc(),
             };
-            let events = &mut self.data.events;
-            // Should never fail because we flush when full
-            events.push(event);
 
-            if events.len() >= EVENTS_VEC_CAPACITY {
-                self.send_to_host();
-            }
+            self.serializer.serialize_event(&event);
         }
-
-        // Mark for clearing when re-entering the VM because we might
-        // not enter on the same place as we exited (e.g. halt)
-        self.cleanup_needed = true;
     }
 
-    /// Returns information about the information needed by the host to read the spans.
-    pub(crate) fn guest_trace_info(&self) -> TraceBatchInfo {
-        let serialized_data: Vec<u8> = Vec::from(&self.data);
-        TraceBatchInfo { serialized_data }
+    /// Return serialized data if any is available
+    pub(crate) fn serialized_data(&self) -> Option<&[u8]> {
+        let data = self.serializer.finish();
+        if data.is_empty() { None } else { Some(data) }
     }
 
     /// Create a new span and push it on the stack
     pub(crate) fn new_span(&mut self, attrs: &Attributes) -> Id {
-        self.verify_and_clean();
         let (idn, id) = self.alloc_id();
 
         let md = attrs.metadata();
@@ -173,21 +164,14 @@ impl GuestState {
             fields,
         };
 
-        let events = &mut self.data.events;
-        // Should never fail because we flush when full
-        events.push(event);
-
-        // In case the spans Vec is full, we need to report them to the host
-        if events.len() >= EVENTS_VEC_CAPACITY {
-            self.send_to_host();
-        }
+        // Serialize the event
+        self.serializer.serialize_event(&event);
 
         id
     }
 
     /// Record an event in the current span (top of the stack)
     pub(crate) fn event(&mut self, event: &Event<'_>) {
-        self.verify_and_clean();
         let stack = &mut self.stack;
         let parent_id = stack.last().copied().unwrap_or(0);
 
@@ -204,29 +188,20 @@ impl GuestState {
             fields,
         };
 
-        // Should never fail because we flush when full
-        self.data.events.push(ev);
-
-        // Flush buffer to host if full
-        if self.data.events.len() >= EVENTS_VEC_CAPACITY {
-            self.send_to_host();
-        }
+        self.serializer.serialize_event(&ev);
     }
 
     /// Record new values for an existing span
     pub(crate) fn record(&mut self, s_id: &Id, values: &Record<'_>) {
-        let spans = &mut self.data.events;
-        if let Some(GuestEvent::OpenSpan { fields, .. }) = spans.iter_mut().find(|e| {
-            if let GuestEvent::OpenSpan { id, .. } = e {
-                *id == s_id.into_u64()
-            } else {
-                false
-            }
-        }) {
-            let mut v = Vec::new();
-            values.record(&mut FieldsVisitor { out: &mut v });
-            fields.extend(v);
-        }
+        let mut v = Vec::new();
+        values.record(&mut FieldsVisitor { out: &mut v });
+
+        let event = GuestEvent::EditSpan {
+            id: s_id.into_u64(),
+            fields: v,
+        };
+
+        self.serializer.serialize_event(&event);
     }
 
     /// Enter a span (push it on the stack)
@@ -244,22 +219,13 @@ impl GuestState {
     /// Try to close a span by ID, returning true if successful
     /// Records the end timestamp for the span.
     pub(crate) fn try_close(&mut self, id: Id) -> bool {
-        let events = &mut self.data.events;
-
         let event = GuestEvent::CloseSpan {
             id: id.into_u64(),
             tsc: invariant_tsc::read_tsc(),
         };
 
-        // Should never fail because we flush when full
-        events.push(event);
+        self.serializer.serialize_event(&event);
 
-        if events.len() >= EVENTS_VEC_CAPACITY {
-            self.send_to_host();
-        }
-
-        // We do not keep the span data in for the duration of the open span
-        // but rather just log the close event.
         true
     }
 }

@@ -355,7 +355,7 @@ fuzz-trace:
     # We need to build the trace guest with the trace feature enabled
     just build-rust-guests release trace_guest
     just move-rust-guests release
-    RUST_LOG="trace,hyperlight_guest=trace,hyperlight_guest_bin=trace" cargo +nightly fuzz run fuzz_guest_trace --features trace --release -- -rss_limit_mb={{ fuzz_memory_limit }}
+    HYPERLIGHT_CORE_DUMP_DIR="." RUST_LOG="trace,hyperlight_guest=trace,hyperlight_guest_bin=trace" cargo +nightly fuzz run fuzz_guest_trace --features trace --release -- -rss_limit_mb={{ fuzz_memory_limit }}
     # Rebuild the trace guest without the trace feature to avoid affecting other tests
     just build-rust-guests release
     just move-rust-guests release
