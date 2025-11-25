@@ -17,10 +17,8 @@ limitations under the License.
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
-use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{
-    GuestEvent, GuestEventsDeserializer, KeyValue as GuestKeyValue,
-};
-use hyperlight_common::outb::OutBAction;
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchDecoder;
+use hyperlight_common::outb::{EventKeyValue, EventsDecoder, GuestEvent, OutBAction};
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as _, TraceContextExt, Tracer as _};
 use opentelemetry::{Context, KeyValue, global};
@@ -34,7 +32,7 @@ use crate::mem::shared_mem::{HostSharedMemory, SharedMemory};
 use crate::{HyperlightError, Result, new_error};
 
 /// Type that helps get the data from the guest provided the registers and memory access
-struct TraceBatch {
+struct EventsBatch {
     events: Vec<GuestEvent>,
 }
 
@@ -42,7 +40,7 @@ impl
     TryFrom<(
         &CommonRegisters,
         &mut SandboxMemoryManager<HostSharedMemory>,
-    )> for TraceBatch
+    )> for EventsBatch
 {
     type Error = HyperlightError;
     fn try_from(
@@ -55,7 +53,7 @@ impl
         let trace_data_ptr = regs.r9 as usize;
         let trace_data_len = regs.r10 as usize;
 
-        if magic_no != OutBAction::TraceBatch as u64 {
+        if magic_no != OutBAction::GuestEvent as u64 {
             return Err(new_error!("A TraceBatch is not present"));
         }
 
@@ -88,7 +86,7 @@ impl
                     new_error!("Failed to get guest trace batch slice from guest memory")
                 })?;
 
-            let events = GuestEventsDeserializer::deserialize(buf_slice).map_err(|e| {
+            let events = EventsBatchDecoder {}.decode(buf_slice).map_err(|e| {
                 tracing::error!("Failed to deserialize guest trace events: {:?}", e);
                 new_error!("Failed to deserialize guest trace events: {:?}", e)
             })?;
@@ -96,7 +94,7 @@ impl
             Ok::<Vec<GuestEvent>, HyperlightError>(events)
         })??;
 
-        Ok(TraceBatch { events })
+        Ok(EventsBatch { events })
     }
 }
 
@@ -221,7 +219,7 @@ impl TraceContext {
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
     ) -> Result<()> {
         // Get the guest sent info
-        let trace_batch = TraceBatch::try_from((regs, mem_mgr))?;
+        let trace_batch = EventsBatch::try_from((regs, mem_mgr))?;
 
         self.handle_trace_impl(trace_batch.events)
     }
@@ -247,7 +245,7 @@ impl TraceContext {
                 GuestEvent::EditSpan { id, fields } => {
                     // Edit existing span attributes
                     if let Some(span) = self.guest_spans.get_mut(&id) {
-                        for GuestKeyValue { key, value } in fields.iter() {
+                        for EventKeyValue { key, value } in fields.iter() {
                             span.set_attribute(KeyValue::new(
                                 key.as_str().to_string(),
                                 value.as_str().to_string(),
@@ -301,7 +299,7 @@ impl TraceContext {
                     let mut span = sb.start_with_context(&tracer, &parent_ctx);
 
                     // Set attributes from fields
-                    for GuestKeyValue { key, value } in fields.iter() {
+                    for EventKeyValue { key, value } in fields.iter() {
                         span.set_attribute(KeyValue::new(
                             key.as_str().to_string(),
                             value.as_str().to_string(),
@@ -347,7 +345,7 @@ impl TraceContext {
                     if let Some(span) = self.guest_spans.get_mut(&parent_id) {
                         let attributes: Vec<KeyValue> = fields
                             .into_iter()
-                            .map(|GuestKeyValue { key, value }| KeyValue::new(key, value))
+                            .map(|EventKeyValue { key, value }| KeyValue::new(key, value))
                             .collect();
                         span.add_event_with_timestamp(name.to_string(), ts, attributes);
                     } else {
@@ -412,9 +410,7 @@ impl Drop for TraceContext {
 
 #[cfg(test)]
 mod tests {
-    use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{
-        GuestEvent, GuestTraceData, KeyValue,
-    };
+    use hyperlight_common::outb::{EventKeyValue, GuestEvent};
 
     use super::*;
 
@@ -435,7 +431,7 @@ mod tests {
         name_str: &str,
         target_str: &str,
         start_tsc: u64,
-        fields: Vec<KeyValue>,
+        fields: Vec<EventKeyValue>,
     ) -> GuestEvent {
         GuestEvent::OpenSpan {
             id,
@@ -455,7 +451,7 @@ mod tests {
         parent_id: u64,
         tsc: u64,
         name_str: &str,
-        fields: Vec<KeyValue>,
+        fields: Vec<EventKeyValue>,
     ) -> GuestEvent {
         GuestEvent::LogEvent {
             parent_id,
@@ -472,62 +468,50 @@ mod tests {
         assert!(trace_ctx.guest_spans.is_empty());
     }
 
-    /// Test handling a `TraceBatch` with no spans or events.
+    /// Test handling a batch with no spans or events.
     #[test]
     fn test_guest_trace_empty_trace_batch() {
         let mut trace_ctx = TraceContext::new();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 0,
-            events: Vec::new(),
-        };
+        let events = vec![];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.is_empty());
         assert!(trace_ctx.host_spans.len() == 1);
     }
 
-    /// Test handling a `TraceBatch` with one span and no events.
+    /// Test handling a batch with one span and no events.
     /// The span is not closed.
     #[test]
     fn test_guest_trace_single_span() {
         let mut trace_ctx = create_dummy_trace_context();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 1000,
-            events: vec![create_open_span(
-                1,
-                None,
-                "test-span",
-                "test-target",
-                2000,
-                vec![],
-            )],
-        };
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "test-span", "test-target", 2000, vec![]),
+        ];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.len() == 1);
         // The active host span is new because a new guest span was created
         assert!(trace_ctx.host_spans.len() == 2);
     }
 
-    /// Test handling a `TraceBatch` with one span that is closed.
+    /// Test handling a batch with one span that is closed.
     /// The span is closed.
     #[test]
     fn test_guest_trace_single_closed_span() {
         let mut trace_ctx = create_dummy_trace_context();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 1000,
-            events: vec![
-                create_open_span(1, None, "test-span", "test-target", 2000, vec![]),
-                create_close_span(1, 2500),
-            ],
-        };
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "test-span", "test-target", 2000, vec![]),
+            create_close_span(1, 2500),
+        ];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.is_empty());
         // The active host span is the same as before because no new guest span was created
@@ -535,65 +519,59 @@ mod tests {
         assert!(trace_ctx.host_spans.len() == 1);
     }
 
-    /// Test handling a `TraceBatch` with one span and one event.
+    /// Test handling a batch with one span and one event.
     /// The span is not closed.
     #[test]
     fn test_guest_trace_span_with_event() {
         let mut trace_ctx = create_dummy_trace_context();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 1000,
-            events: vec![
-                create_open_span(1, None, "test-span", "test-target", 2000, vec![]),
-                create_log_event(1, 2500, "test-event", vec![]),
-            ],
-        };
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "test-span", "test-target", 2000, vec![]),
+            create_log_event(1, 2500, "test-event", vec![]),
+        ];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.len() == 1);
         // The active host span is new because a new guest span was created
         assert!(trace_ctx.host_spans.len() == 2);
     }
 
-    /// Test handling a `TraceBatch` with two open spans in a parent-child relationship.
+    /// Test handling a batch with two open spans in a parent-child relationship.
     /// The spans are not closed.
     #[test]
     fn test_guest_trace_parent_child_spans() {
         let mut trace_ctx = create_dummy_trace_context();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 1000,
-            events: vec![
-                create_open_span(1, None, "parent-span", "test-target", 2000, vec![]),
-                create_open_span(2, Some(1), "child-span", "test-target", 2500, vec![]),
-            ],
-        };
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "parent-span", "test-target", 2000, vec![]),
+            create_open_span(2, Some(1), "child-span", "test-target", 2500, vec![]),
+        ];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.len() == 2);
         // The active host span is new because new guest spans were created
         assert!(trace_ctx.host_spans.len() == 2);
     }
 
-    /// Test handling a `TraceBatch` with two closed spans in a parent-child relationship.
+    /// Test handling a batch with two closed spans in a parent-child relationship.
     /// The spans are closed.
     #[test]
     fn test_guest_trace_closed_parent_child_spans() {
         let mut trace_ctx = create_dummy_trace_context();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 1000,
-            events: vec![
-                create_open_span(1, None, "parent-span", "test-target", 2000, vec![]),
-                create_open_span(2, Some(1), "child-span", "test-target", 2500, vec![]),
-                create_close_span(2, 3500),
-                create_close_span(1, 3000),
-            ],
-        };
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "parent-span", "test-target", 2000, vec![]),
+            create_open_span(2, Some(1), "child-span", "test-target", 2500, vec![]),
+            create_close_span(2, 3000),
+            create_close_span(1, 3500),
+        ];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.is_empty());
         // The active host span is the same as before because no new guest spans were created
@@ -601,23 +579,21 @@ mod tests {
         assert!(trace_ctx.host_spans.len() == 1);
     }
 
-    /// Test handling a `TraceBatch` with two spans partially closed in a parent-child
+    /// Test handling a batch with two spans partially closed in a parent-child
     /// relationship.
     /// The parent span is open, the child span is closed.
     #[test]
     fn test_guest_trace_partially_closed_parent_child_spans() {
         let mut trace_ctx = create_dummy_trace_context();
 
-        let trace_data = GuestTraceData {
-            start_tsc: 1000,
-            events: vec![
-                create_open_span(1, None, "parent-span", "test-target", 2000, vec![]),
-                create_open_span(2, Some(1), "child-span", "test-target", 2500, vec![]),
-                create_close_span(2, 3500),
-            ],
-        };
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "parent-span", "test-target", 2000, vec![]),
+            create_open_span(2, Some(1), "child-span", "test-target", 2500, vec![]),
+            create_close_span(2, 3000),
+        ];
 
-        let res = trace_ctx.handle_trace_impl(trace_data);
+        let res = trace_ctx.handle_trace_impl(events);
         assert!(res.is_ok());
         assert!(trace_ctx.guest_spans.len() == 1);
         // The active host span is new because a new guest span was created

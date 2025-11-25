@@ -20,6 +20,7 @@ extern crate alloc;
 
 use core::fmt::Write;
 
+use alloc::sync::Arc;
 use buddy_system_allocator::LockedHeap;
 #[cfg(target_arch = "x86_64")]
 use exceptions::{gdt::load_gdt, idtr::load_idt};
@@ -27,13 +28,14 @@ use guest_function::call::dispatch_function;
 use guest_function::register::GuestFunctionRegister;
 use guest_logger::init_logger;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
 use hyperlight_common::mem::HyperlightPEB;
 #[cfg(feature = "mem_profile")]
 use hyperlight_common::outb::OutBAction;
 use hyperlight_guest::exit::{halt, write_abort};
 use hyperlight_guest::guest_handle::handle::GuestHandle;
 use log::LevelFilter;
-use spin::Once;
+use spin::{Mutex, Once};
 
 // === Modules ===
 #[cfg(target_arch = "x86_64")]
@@ -124,6 +126,9 @@ pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister =
     GuestFunctionRegister::new();
 
 pub static mut MIN_STACK_ADDRESS: u64 = 0;
+
+/// Global events encoder for logging and tracing
+pub static EVENTS_ENCODER: Once<Arc<Mutex<EventsBatchEncoder>>> = Once::new();
 
 pub static mut OS_PAGE_SIZE: u32 = 0;
 
@@ -236,7 +241,13 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
             // It is important that all the tracing events are produced after the tracing is initialized.
             #[cfg(feature = "trace_guest")]
             if max_log_level != LevelFilter::Off {
-                hyperlight_guest_tracing::init_guest_tracing(guest_start_tsc);
+                hyperlight_guest_tracing::init_guest_tracing(
+                    guest_start_tsc,
+                    EVENTS_ENCODER
+                        .get()
+                        .expect("The EVENTS_ENCODER should have been already initialized")
+                        .clone(),
+                );
             }
 
             hyperlight_main();

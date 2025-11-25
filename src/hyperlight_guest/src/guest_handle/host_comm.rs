@@ -179,45 +179,24 @@ impl GuestHandle {
         line: u32,
     ) {
         // Closure to send log message to host
-        let send_to_host = || {
-            let guest_log_data = GuestLogData::new(
-                message.to_string(),
-                source.to_string(),
-                log_level,
-                caller.to_string(),
-                source_file.to_string(),
-                line,
-            );
+        let guest_log_data = GuestLogData::new(
+            message.to_string(),
+            source.to_string(),
+            log_level,
+            caller.to_string(),
+            source_file.to_string(),
+            line,
+        );
 
-            let bytes: Vec<u8> = guest_log_data
-                .try_into()
-                .expect("Failed to convert GuestLogData to bytes");
+        let bytes: Vec<u8> = guest_log_data
+            .try_into()
+            .expect("Failed to convert GuestLogData to bytes");
 
-            self.push_shared_output_data(&bytes)
-                .expect("Unable to push log data to shared output data");
+        self.push_shared_output_data(&bytes)
+            .expect("Unable to push log data to shared output data");
 
-            unsafe {
-                out32(OutBAction::Log as u16, 0);
-            }
-        };
-
-        #[cfg(feature = "trace_guest")]
-        if hyperlight_guest_tracing::is_trace_enabled() {
-            // If the "trace_guest" feature is enabled and tracing is initialized, log using tracing
-            tracing::trace!(
-                event = message,
-                level = ?log_level,
-                code.filepath = source,
-                caller = caller,
-                source_file = source_file,
-                code.lineno = line,
-            );
-        } else {
-            send_to_host();
-        }
-        #[cfg(not(feature = "trace_guest"))]
-        {
-            send_to_host();
+        unsafe {
+            out32(OutBAction::Log as u16, 0);
         }
     }
 }

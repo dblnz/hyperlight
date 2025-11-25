@@ -21,7 +21,7 @@ limitations under the License.
 //!
 //! Schema definitions can be found in `src/schema/guest_trace_data.fbs`.
 
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use anyhow::{Error, Result, anyhow};
@@ -37,40 +37,32 @@ use crate::flatbuffers::hyperlight::generated::{
     LogEventTypeArgs as FbLogEventTypeArgs, OpenSpanType as FbOpenSpanType,
     OpenSpanTypeArgs as FbOpenSpanTypeArgs,
 };
+use crate::outb::{EventKeyValue, EventsDecoder, EventsEncoder, GuestEvent};
 
-/// Key-Value pair structure used in tracing spans/events
-#[derive(Debug, Clone)]
-pub struct KeyValue {
-    /// Key of the key-value pair
-    pub key: String,
-    /// Value of the key-value pair
-    pub value: String,
-}
-
-impl From<FbKeyValue<'_>> for KeyValue {
+impl From<FbKeyValue<'_>> for EventKeyValue {
     fn from(value: FbKeyValue<'_>) -> Self {
         let key = value.key().to_string();
         let value = value.value().to_string();
 
-        KeyValue { key, value }
+        EventKeyValue { key, value }
     }
 }
 
-impl TryFrom<&[u8]> for KeyValue {
+impl TryFrom<&[u8]> for EventKeyValue {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         let gld_gen = size_prefixed_root::<FbKeyValue>(value)
-            .map_err(|e| anyhow!("Error while reading KeyValue: {:?}", e))?;
+            .map_err(|e| anyhow!("Error while reading EventKeyValue: {:?}", e))?;
         let key = gld_gen.key().to_string();
         let value = gld_gen.value().to_string();
 
-        Ok(KeyValue { key, value })
+        Ok(EventKeyValue { key, value })
     }
 }
 
-impl From<&KeyValue> for Vec<u8> {
-    fn from(value: &KeyValue) -> Self {
+impl From<&EventKeyValue> for Vec<u8> {
+    fn from(value: &EventKeyValue) -> Self {
         let mut builder = flatbuffers::FlatBufferBuilder::new();
 
         let key_offset = builder.create_string(&value.key);
@@ -88,64 +80,10 @@ impl From<&KeyValue> for Vec<u8> {
     }
 }
 
-impl From<KeyValue> for Vec<u8> {
-    fn from(value: KeyValue) -> Self {
+impl From<EventKeyValue> for Vec<u8> {
+    fn from(value: EventKeyValue) -> Self {
         Vec::from(&value)
     }
-}
-
-/// Enum representing different types of guest events for tracing
-/// such as opening/closing spans and logging events.
-#[derive(Debug)]
-pub enum GuestEvent {
-    /// Event representing the opening of a new tracing span.
-    OpenSpan {
-        /// Unique identifier for the span.
-        /// This ID is used to correlate open and close events.
-        /// It should be unique within the context of a sandboxed guest execution.
-        id: u64,
-        /// Optional parent span ID, if this span is nested within another span.
-        parent_id: Option<u64>,
-        /// Name of the span.
-        name: String,
-        /// Target associated with the span.
-        target: String,
-        /// Timestamp Counter (TSC) value when the span was opened.
-        tsc: u64,
-        /// Additional key-value fields associated with the span.
-        fields: Vec<KeyValue>,
-    },
-    /// Event representing the closing of a tracing span.
-    CloseSpan {
-        /// Unique identifier for the span being closed.
-        id: u64,
-        /// Timestamp Counter (TSC) value when the span was closed.
-        tsc: u64,
-    },
-    /// Event representing a log entry within a tracing span.
-    LogEvent {
-        /// Identifier of the parent span for this log event.
-        parent_id: u64,
-        /// Name of the log event.
-        name: String,
-        /// Timestamp Counter (TSC) value when the log event occurred.
-        tsc: u64,
-        /// Additional key-value fields associated with the log event.
-        fields: Vec<KeyValue>,
-    },
-    /// Event representing an edit to an existing span.
-    /// Corresponds to the `record` method in the tracing subscriber trait.
-    EditSpan {
-        /// Unique identifier for the span to edit.
-        id: u64,
-        /// Fields to add or modify in the span.
-        fields: Vec<KeyValue>,
-    },
-    /// Event representing the start of the guest environment.
-    GuestStart {
-        /// Timestamp Counter (TSC) value when the guest started.
-        tsc: u64,
-    },
 }
 
 impl TryFrom<&[u8]> for GuestEvent {
@@ -175,7 +113,7 @@ impl TryFrom<&[u8]> for GuestEvent {
                 let mut fields = Vec::new();
                 if let Some(fb_fields) = ost_fb.fields() {
                     for j in 0..fb_fields.len() {
-                        let kv: KeyValue = KeyValue::from(fb_fields.get(j));
+                        let kv: EventKeyValue = EventKeyValue::from(fb_fields.get(j));
                         fields.push(kv);
                     }
                 }
@@ -217,7 +155,7 @@ impl TryFrom<&[u8]> for GuestEvent {
                 let mut fields = Vec::new();
                 if let Some(fb_fields) = le_fb.fields() {
                     for j in 0..fb_fields.len() {
-                        let kv: KeyValue = KeyValue::from(fb_fields.get(j));
+                        let kv: EventKeyValue = EventKeyValue::from(fb_fields.get(j));
                         fields.push(kv);
                     }
                 }
@@ -239,7 +177,7 @@ impl TryFrom<&[u8]> for GuestEvent {
                 let mut fields = Vec::new();
                 if let Some(fb_fields) = est_fb.fields() {
                     for j in 0..fb_fields.len() {
-                        let kv: KeyValue = KeyValue::from(fb_fields.get(j));
+                        let kv: EventKeyValue = EventKeyValue::from(fb_fields.get(j));
                         fields.push(kv);
                     }
                 }
@@ -666,10 +604,10 @@ mod estimate {
     }
 }
 
-pub struct GuestEventsDeserializer;
+pub struct EventsBatchDecoder;
 
-impl GuestEventsDeserializer {
-    pub fn deserialize(data: &[u8]) -> Result<Vec<GuestEvent>, Error> {
+impl EventsDecoder for EventsBatchDecoder {
+    fn decode(&self, data: &[u8]) -> Result<Vec<GuestEvent>, Error> {
         let mut cursor = 0;
         let mut events = Vec::new();
 
@@ -696,37 +634,43 @@ impl GuestEventsDeserializer {
     }
 }
 
-pub struct GuestEventsSerializer<T: Fn(&[u8])> {
+pub type EventsBatchEncoder = EventsBatchEncoderGeneric<fn(&[u8])>;
+
+/// Encoder for batching and serializing guest events into a buffer.
+/// When the buffer reaches its capacity, the provided `report_full` callback
+/// is invoked with the current buffer contents.
+///
+/// This encoder uses FlatBuffers for serialization.
+/// This encoder is a lossless encoder; no events are dropped.
+pub struct EventsBatchEncoderGeneric<T: Fn(&[u8])> {
+    /// Internal buffer for serialized events
     buffer: Vec<u8>,
+    /// Maximum capacity of the buffer
     capacity: usize,
+    /// Callback function to report when the buffer is full
     report_full: T,
+    /// Current used capacity of the buffer
     used_capacity: usize,
 }
 
-impl<T: Fn(&[u8])> GuestEventsSerializer<T> {
+impl<T: Fn(&[u8])> EventsBatchEncoderGeneric<T> {
+    /// Create a new EventsBatchEncoder with the specified initial capacity
     pub fn new(initial_capacity: usize, report_full: T) -> Self {
-        GuestEventsSerializer {
+        Self {
             buffer: Vec::with_capacity(initial_capacity),
             capacity: initial_capacity,
             report_full,
             used_capacity: 0,
         }
     }
+}
 
-    pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.used_capacity = 0;
-    }
-
-    pub fn finish(&self) -> &[u8] {
-        &self.buffer
-    }
-
+impl<T: Fn(&[u8])> EventsEncoder for EventsBatchEncoderGeneric<T> {
     /// Serialize a single GuestEvent and append it to the internal buffer.
     /// If the appending of the serialized data exceeds buffer capacity, the
     /// `report_full` callback is invoked with the current buffer contents,
     /// and the buffer is cleared for new data.
-    pub fn serialize_event(&mut self, event: &GuestEvent) {
+    fn encode(&mut self, event: &GuestEvent) {
         // TODO: Estimate size more accurately
         let estimated_size = 1024;
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(estimated_size);
@@ -917,11 +861,33 @@ impl<T: Fn(&[u8])> GuestEventsSerializer<T> {
         self.buffer.extend_from_slice(serialized);
         self.used_capacity += serialized.len();
     }
+
+    /// Get a reference to the internal buffer containing serialized events.
+    /// This buffer can be sent or processed as needed.
+    fn finish(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// Flush the internal buffer by invoking the `report_full` callback
+    /// with the current buffer contents, then resetting the buffer.
+    fn flush(&mut self) {
+        if !self.buffer.is_empty() {
+            (self.report_full)(&self.buffer);
+            self.reset();
+        }
+    }
+    /// Reset the internal buffer, clearing all serialized data.
+    /// This prepares the encoder for new events.
+    fn reset(&mut self) {
+        self.buffer.clear();
+        self.used_capacity = 0;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outb::{EventKeyValue, GuestEvent};
 
     /// Utility function to check an original GuestTraceData against a deserialized one
     fn check_fb_guest_trace_data(orig: &[GuestEvent], deserialized: &[GuestEvent]) {
@@ -993,14 +959,14 @@ mod tests {
 
     #[test]
     fn test_fb_key_value_serialization() {
-        let kv = KeyValue {
+        let kv = EventKeyValue {
             key: "test_key".to_string(),
             value: "test_value".to_string(),
         };
 
         let serialized: Vec<u8> = Vec::from(&kv);
-        let deserialized: KeyValue =
-            KeyValue::try_from(serialized.as_slice()).expect("Deserialization failed");
+        let deserialized: EventKeyValue =
+            EventKeyValue::try_from(serialized.as_slice()).expect("Deserialization failed");
 
         assert_eq!(kv.key, deserialized.key);
         assert_eq!(kv.value, deserialized.value);
@@ -1008,12 +974,12 @@ mod tests {
 
     #[test]
     fn test_fb_guest_trace_data_open_span_serialization() {
-        let mut serializer = GuestEventsSerializer::new(1024, |_| {});
-        let kv1 = KeyValue {
+        let mut serializer = EventsBatchEncoder::new(1024, |_| {});
+        let kv1 = EventKeyValue {
             key: "test_key1".to_string(),
             value: "test_value1".to_string(),
         };
-        let kv2 = KeyValue {
+        let kv2 = EventKeyValue {
             key: "test_key1".to_string(),
             value: "test_value2".to_string(),
         };
@@ -1031,13 +997,14 @@ mod tests {
         ];
 
         for event in &events {
-            serializer.serialize_event(event);
+            serializer.encode(event);
         }
 
         let serialized = serializer.finish();
 
-        let deserialized: Vec<GuestEvent> =
-            GuestEventsDeserializer::deserialize(serialized).expect("Deserialization failed");
+        let deserialized: Vec<GuestEvent> = EventsBatchDecoder {}
+            .decode(serialized)
+            .expect("Deserialization failed");
 
         check_fb_guest_trace_data(&events, &deserialized);
     }
@@ -1046,25 +1013,26 @@ mod tests {
     fn test_fb_guest_trace_data_close_span_serialization() {
         let events = [GuestEvent::CloseSpan { id: 1, tsc: 200 }];
 
-        let mut serializer = GuestEventsSerializer::new(1024, |_| {});
+        let mut serializer = EventsBatchEncoder::new(1024, |_| {});
         for event in &events {
-            serializer.serialize_event(event);
+            serializer.encode(event);
         }
         let serialized = serializer.finish();
 
-        let deserialized =
-            GuestEventsDeserializer::deserialize(serialized).expect("Deserialization failed");
+        let deserialized = EventsBatchDecoder {}
+            .decode(serialized)
+            .expect("Deserialization failed");
 
         check_fb_guest_trace_data(&events, &deserialized);
     }
 
     #[test]
     fn test_fb_guest_trace_data_log_event_serialization() {
-        let kv1 = KeyValue {
+        let kv1 = EventKeyValue {
             key: "log_key1".to_string(),
             value: "log_value1".to_string(),
         };
-        let kv2 = KeyValue {
+        let kv2 = EventKeyValue {
             key: "log_key2".to_string(),
             value: "log_value2".to_string(),
         };
@@ -1076,14 +1044,15 @@ mod tests {
             fields: Vec::from([kv1, kv2]),
         }];
 
-        let mut serializer = GuestEventsSerializer::new(1024, |_| {});
+        let mut serializer = EventsBatchEncoder::new(1024, |_| {});
         for event in &events {
-            serializer.serialize_event(event);
+            serializer.encode(event);
         }
         let serialized = serializer.finish();
 
-        let deserialized =
-            GuestEventsDeserializer::deserialize(serialized).expect("Deserialization failed");
+        let deserialized = EventsBatchDecoder {}
+            .decode(serialized)
+            .expect("Deserialization failed");
 
         check_fb_guest_trace_data(&events, &deserialized);
     }
@@ -1092,11 +1061,11 @@ mod tests {
     /// [OpenSpan, LogEvent, CloseSpan]
     #[test]
     fn test_fb_guest_trace_data_multiple_events_serialization_0() {
-        let kv1 = KeyValue {
+        let kv1 = EventKeyValue {
             key: "span_field1".to_string(),
             value: "span_value1".to_string(),
         };
-        let kv2 = KeyValue {
+        let kv2 = EventKeyValue {
             key: "log_field1".to_string(),
             value: "log_value1".to_string(),
         };
@@ -1119,13 +1088,14 @@ mod tests {
             GuestEvent::CloseSpan { id: 1, tsc: 200 },
         ];
 
-        let mut serializer = GuestEventsSerializer::new(2048, |_| {});
+        let mut serializer = EventsBatchEncoder::new(2048, |_| {});
         for event in &events {
-            serializer.serialize_event(event);
+            serializer.encode(event);
         }
         let serialized = serializer.finish();
-        let deserialized =
-            GuestEventsDeserializer::deserialize(serialized).expect("Deserialization failed");
+        let deserialized = EventsBatchDecoder {}
+            .decode(serialized)
+            .expect("Deserialization failed");
 
         check_fb_guest_trace_data(&events, &deserialized);
     }
@@ -1134,11 +1104,11 @@ mod tests {
     /// [OpenSpan, LogEvent, OpenSpan, LogEvent, CloseSpan]
     #[test]
     fn test_fb_guest_trace_data_multiple_events_serialization_1() {
-        let kv1 = KeyValue {
+        let kv1 = EventKeyValue {
             key: "span_field1".to_string(),
             value: "span_value1".to_string(),
         };
-        let kv2 = KeyValue {
+        let kv2 = EventKeyValue {
             key: "log_field1".to_string(),
             value: "log_value1".to_string(),
         };
@@ -1175,13 +1145,14 @@ mod tests {
             GuestEvent::CloseSpan { id: 2, tsc: 2000 },
         ];
 
-        let mut serializer = GuestEventsSerializer::new(4096, |_| {});
+        let mut serializer = EventsBatchEncoder::new(4096, |_| {});
         for event in &events {
-            serializer.serialize_event(event);
+            serializer.encode(event);
         }
         let serialized = serializer.finish();
-        let deserialized =
-            GuestEventsDeserializer::deserialize(serialized).expect("Deserialization failed");
+        let deserialized = EventsBatchDecoder {}
+            .decode(serialized)
+            .expect("Deserialization failed");
 
         check_fb_guest_trace_data(&events, &deserialized);
     }

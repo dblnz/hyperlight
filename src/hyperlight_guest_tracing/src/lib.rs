@@ -45,7 +45,8 @@ pub use trace::{
 #[cfg(feature = "trace")]
 mod trace {
     extern crate alloc;
-    use alloc::sync::{Arc, Weak};
+    use alloc::sync::Arc;
+    use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
 
     use spin::Mutex;
 
@@ -53,18 +54,17 @@ mod trace {
     use crate::subscriber::GuestSubscriber;
 
     /// Weak reference to the guest state so we can manually trigger flush to host
-    static GUEST_STATE: spin::Once<Weak<Mutex<GuestState>>> = spin::Once::new();
+    static GUEST_STATE: spin::Once<Arc<Mutex<GuestState>>> = spin::Once::new();
 
     /// Initialize the guest tracing subscriber as global default.
-    pub fn init_guest_tracing(guest_start_tsc: u64) {
+    pub fn init_guest_tracing(guest_start_tsc: u64, encoder: Arc<Mutex<EventsBatchEncoder>>) {
         // Set as global default if not already set.
         if tracing_core::dispatcher::has_been_set() {
             return;
         }
-        let sub = GuestSubscriber::new(guest_start_tsc);
-        let state = sub.state();
-        // Store state Weak<GuestState> to use later at runtime
-        GUEST_STATE.call_once(|| Arc::downgrade(state));
+
+        let state = Arc::new(Mutex::new(GuestState::new(guest_start_tsc, encoder)));
+        let sub = GuestSubscriber::new(state);
 
         // Set global dispatcher
         let _ = tracing_core::dispatcher::set_global_default(tracing_core::Dispatch::new(sub));
@@ -77,8 +77,7 @@ mod trace {
     /// After calling this function, the internal state is marked
     /// for cleaning on the next access.
     pub fn end_trace() {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
+        if let Some(state_mutex) = GUEST_STATE.get()
             && let Some(mut state) = state_mutex.try_lock()
         {
             state.end_trace();
@@ -87,8 +86,7 @@ mod trace {
 
     /// Flushes the current trace data to prepare it for reading by the host.
     pub fn flush() {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
+        if let Some(state_mutex) = GUEST_STATE.get()
             && let Some(mut state) = state_mutex.try_lock()
         {
             state.flush();
@@ -98,8 +96,7 @@ mod trace {
     /// Resets the internal trace state for a new guest function call.
     /// This clears any existing spans/events from previous calls ensuring a clean state.
     pub fn new_call(guest_start_tsc: u64) {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
+        if let Some(state_mutex) = GUEST_STATE.get()
             && let Some(mut state) = state_mutex.try_lock()
         {
             state.new_call(guest_start_tsc);
@@ -110,8 +107,7 @@ mod trace {
     /// This ensures that after a VM exit, we keep the spans that
     /// are still active (in the stack) and remove all other spans and events.
     pub fn reset() {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
+        if let Some(state_mutex) = GUEST_STATE.get()
             && let Some(mut state) = state_mutex.try_lock()
         {
             state.reset();
@@ -124,15 +120,10 @@ mod trace {
     /// Returns None if state is locked or there is no serialized data, otherwise returns Some with
     /// pointer and length of the serialized data slice.
     pub fn serialized_data() -> Option<(u64, u64)> {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
+        if let Some(state_mutex) = GUEST_STATE.get()
             && let Some(state) = state_mutex.try_lock()
         {
-            if let Some(slice) = state.serialized_data() {
-                Some((slice.as_ptr() as u64, slice.len() as u64))
-            } else {
-                None
-            }
+            state.serialized_data()
         } else {
             None
         }
@@ -140,9 +131,6 @@ mod trace {
 
     /// Returns true if tracing is enabled (the guest tracing state is initialized).
     pub fn is_trace_enabled() -> bool {
-        GUEST_STATE
-            .get()
-            .map(|w| w.upgrade().is_some())
-            .unwrap_or(false)
+        GUEST_STATE.get().is_some()
     }
 }

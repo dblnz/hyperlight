@@ -14,17 +14,51 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use alloc::format;
+use alloc::sync::Arc;
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
+use hyperlight_common::outb::{EventsEncoder, OutBAction};
+use spin::Mutex;
 
 use hyperlight_common::flatbuffer_wrappers::guest_log_level::LogLevel;
 use log::{LevelFilter, Metadata, Record};
 
+use crate::EVENTS_ENCODER;
 use crate::GUEST_HANDLE;
+
+/// TODO: Change these constant to be configurable at runtime by the guest
+/// Maybe use a weak symbol that the guest can override at link time?
+///
+/// Pre-calculated capacity for the encoder buffer
+/// This is to avoid reallocations in the guest
+const ENCODER_CAPACITY: usize = 4096;
+
+/// Triggers a VM exit to flush the current events to the host.
+fn send_to_host(data: &[u8]) {
+    unsafe {
+        core::arch::asm!("out dx, al",
+            // Port value for tracing
+            in("dx") OutBAction::GuestEvent as u16,
+            in("al") 0u8,
+            // Additional magic number to identify the action
+            in("r8") OutBAction::GuestEvent as u64,
+            in("r9") data.as_ptr() as u64,
+            in("r10") data.len() as u64,
+        );
+    }
+}
 
 // this is private on purpose so that `log` can only be called though the `log!` macros.
 struct GuestLogger {}
 
 pub(crate) fn init_logger(level: LevelFilter) {
+    // Initialize the global events encoder
+    EVENTS_ENCODER.call_once(|| {
+        Arc::new(Mutex::new(EventsBatchEncoder::new(
+            ENCODER_CAPACITY,
+            send_to_host,
+        )))
+    });
+
     // if this `expect` fails we have no way to recover anyway, so we actually prefer a panic here
     // below temporary guest logger is promoted to static by the compiler.
     log::set_logger(&GuestLogger {}).expect("unable to setup guest logger");
@@ -40,20 +74,17 @@ impl log::Log for GuestLogger {
     }
 
     fn log(&self, record: &Record) {
-        let handle = unsafe { GUEST_HANDLE };
-        if self.enabled(record.metadata()) {
-            handle.log_message(
-                record.level().into(),
-                format!("{}", record.args()).as_str(),
-                record.module_path().unwrap_or("Unknown"),
-                record.target(),
-                record.file().unwrap_or("Unknown"),
-                record.line().unwrap_or(0),
-            );
-        }
+        if self.enabled(record.metadata()) {}
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        if let Some(enc) = EVENTS_ENCODER.get()
+            && let Some(encoder) = enc.try_lock()
+        {
+            let data = encoder.finish();
+            send_to_host(data);
+        }
+    }
 }
 
 pub fn log_message(

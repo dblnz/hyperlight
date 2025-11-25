@@ -19,5 +19,5 @@ tracing-core = { version = "0.1.34", default-features = false }
 workspace = true
 
 [features]
-default = []
+default = ["trace"]
 trace = [ "hyperlight-common/trace_guest" ]
