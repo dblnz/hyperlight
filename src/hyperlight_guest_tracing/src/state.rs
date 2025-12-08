@@ -56,10 +56,10 @@ fn send_to_host(data: &[u8]) {
     unsafe {
         core::arch::asm!("out dx, al",
             // Port value for tracing
-            in("dx") OutBAction::TraceBatch as u16,
+            in("dx") OutBAction::GuestEvent as u16,
             in("al") 0u8,
             // Additional magic number to identify the action
-            in("r8") OutBAction::TraceBatch as u64,
+            in("r8") OutBAction::GuestEvent as u64,
             in("r9") data.as_ptr() as u64,
             in("r10") data.len() as u64,
         );

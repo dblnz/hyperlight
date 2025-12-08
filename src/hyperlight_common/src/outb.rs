@@ -186,7 +186,7 @@ pub enum OutBAction {
     Abort = 102,
     DebugPrint = 103,
     #[cfg(feature = "trace_guest")]
-    TraceBatch = 104,
+    GuestEvent = 104,
     #[cfg(feature = "mem_profile")]
     TraceMemoryAlloc = 105,
     #[cfg(feature = "mem_profile")]
@@ -202,7 +202,7 @@ impl TryFrom<u16> for OutBAction {
             102 => Ok(OutBAction::Abort),
             103 => Ok(OutBAction::DebugPrint),
             #[cfg(feature = "trace_guest")]
-            104 => Ok(OutBAction::TraceBatch),
+            104 => Ok(OutBAction::GuestEvent),
             #[cfg(feature = "mem_profile")]
             105 => Ok(OutBAction::TraceMemoryAlloc),
             #[cfg(feature = "mem_profile")]

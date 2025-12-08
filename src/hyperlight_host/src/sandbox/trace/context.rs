@@ -53,7 +53,7 @@ impl
         let trace_data_ptr = regs.r9 as usize;
         let trace_data_len = regs.r10 as usize;
 
-        if magic_no != OutBAction::TraceBatch as u64 {
+        if magic_no != OutBAction::GuestEvent as u64 {
             return Err(new_error!("A TraceBatch is not present"));
         }
 
