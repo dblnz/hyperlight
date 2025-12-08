@@ -185,7 +185,6 @@ pub(crate) fn handle_outb(
             eprint!("{}", ch);
             Ok(())
         }
-        #[cfg(feature = "trace_guest")]
         OutBAction::GuestEvent => Ok(()),
         #[cfg(feature = "mem_profile")]
         OutBAction::TraceMemoryAlloc => trace_info.handle_trace_mem_alloc(regs, mem_mgr),

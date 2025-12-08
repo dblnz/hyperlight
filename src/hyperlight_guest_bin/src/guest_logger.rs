@@ -15,11 +15,14 @@ limitations under the License.
 */
 
 use alloc::format;
+use alloc::string::ToString;
+use alloc::vec;
 
 use hyperlight_common::flatbuffer_wrappers::guest_log_level::LogLevel;
+use hyperlight_common::outb::{EventKeyValue, EventsEncoder, GuestEvent};
 use log::{LevelFilter, Metadata, Record};
 
-use crate::GUEST_HANDLE;
+use crate::{EVENTS_ENCODER, GUEST_HANDLE};
 
 // this is private on purpose so that `log` can only be called though the `log!` macros.
 struct GuestLogger {}
@@ -40,20 +43,56 @@ impl log::Log for GuestLogger {
     }
 
     fn log(&self, record: &Record) {
-        let handle = unsafe { GUEST_HANDLE };
         if self.enabled(record.metadata()) {
-            handle.log_message(
-                record.level().into(),
-                format!("{}", record.args()).as_str(),
-                record.module_path().unwrap_or("Unknown"),
-                record.target(),
-                record.file().unwrap_or("Unknown"),
-                record.line().unwrap_or(0),
-            );
+            if let Some(enc) = EVENTS_ENCODER.get()
+                && let Some(mut encoder) = enc.try_lock()
+            {
+                let msg = format!("{}", record.args());
+                let event = GuestEvent::LogEvent {
+                    parent_id: 0,
+                    name: msg.clone(),
+                    tsc: 0,
+                    fields: vec![
+                        EventKeyValue {
+                            key: "level".to_string(),
+                            value: format!("{}", record.level()),
+                        },
+                        EventKeyValue {
+                            key: "module".to_string(),
+                            value: record.module_path().unwrap_or("Unkwnown").to_string(),
+                        },
+                        EventKeyValue {
+                            key: "target".to_string(),
+                            value: record.target().to_string(),
+                        },
+                        EventKeyValue {
+                            key: "file".to_string(),
+                            value: record.file().unwrap_or("Unknown").to_string(),
+                        },
+                        EventKeyValue {
+                            key: "line".to_string(),
+                            value: record.line().unwrap_or(0).to_string(),
+                        },
+                        EventKeyValue {
+                            key: "message".to_string(),
+                            value: msg,
+                        },
+                    ],
+                };
+
+                encoder.encode(&event);
+            }
         }
     }
 
-    fn flush(&self) {}
+    fn flush(&self) {
+        if let Some(enc) = EVENTS_ENCODER.get()
+            && let Some(mut encoder) = enc.try_lock()
+        {
+            // Send any pending log events to the host and reset the encoder
+            encoder.flush();
+        }
+    }
 }
 
 pub fn log_message(
