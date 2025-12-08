@@ -17,10 +17,8 @@ limitations under the License.
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
-use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{
-    EventKeyValue, EventsBatchDecoder, EventsDecoder, GuestEvent,
-};
-use hyperlight_common::outb::OutBAction;
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchDecoder;
+use hyperlight_common::outb::{EventKeyValue, EventsDecoder, GuestEvent, OutBAction};
 use opentelemetry::global::BoxedSpan;
 use opentelemetry::trace::{Span as _, TraceContextExt, Tracer as _};
 use opentelemetry::{Context, KeyValue, global};
@@ -410,7 +408,7 @@ impl Drop for TraceContext {
 
 #[cfg(test)]
 mod tests {
-    use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{EventKeyValue, GuestEvent};
+    use hyperlight_common::outb::{EventKeyValue, GuestEvent};
 
     use super::*;
 

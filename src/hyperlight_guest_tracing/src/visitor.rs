@@ -19,7 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
-use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventKeyValue;
+use hyperlight_common::outb::EventKeyValue;
 use tracing_core::field::{Field, Visit};
 
 /// Visitor implementation to collect fields into a vector of key-value pairs

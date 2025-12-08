@@ -19,10 +19,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{
-    EventsBatchEncoder, EventsEncoder, GuestEvent,
-};
 use hyperlight_common::outb::OutBAction;
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
+use hyperlight_common::outb::{EventsEncoder, GuestEvent};
 use tracing_core::Event;
 use tracing_core::span::{Attributes, Id, Record};
 
