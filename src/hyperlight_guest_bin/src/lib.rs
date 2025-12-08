@@ -18,6 +18,7 @@ limitations under the License.
 // === Dependencies ===
 extern crate alloc;
 
+use alloc::sync::Arc;
 use core::fmt::Write;
 
 use buddy_system_allocator::LockedHeap;
@@ -27,13 +28,14 @@ use guest_function::call::dispatch_function;
 use guest_function::register::GuestFunctionRegister;
 use guest_logger::init_logger;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
+use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
 use hyperlight_common::mem::HyperlightPEB;
 #[cfg(feature = "mem_profile")]
 use hyperlight_common::outb::OutBAction;
 use hyperlight_guest::exit::{halt, write_abort};
 use hyperlight_guest::guest_handle::handle::GuestHandle;
 use log::LevelFilter;
-use spin::Once;
+use spin::{Mutex, Once};
 
 // === Modules ===
 #[cfg(target_arch = "x86_64")]
@@ -125,6 +127,17 @@ pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister =
 
 pub static mut MIN_STACK_ADDRESS: u64 = 0;
 
+/// TODO: Change these constant to be configurable at runtime by the guest
+/// Maybe use a weak symbol that the guest can override at link time?
+///
+/// Pre-calculated capacity for the encoder buffer
+/// This is to avoid reallocations in the guest
+#[cfg(feature = "trace_guest")]
+const ENCODER_CAPACITY: usize = 4096;
+/// Global events encoder for logging and tracing
+#[cfg(feature = "trace_guest")]
+pub static EVENTS_ENCODER: Once<Arc<Mutex<EventsBatchEncoder>>> = Once::new();
+
 pub static mut OS_PAGE_SIZE: u32 = 0;
 
 // === Panic Handler ===
@@ -168,6 +181,32 @@ fn _panic_handler(info: &core::panic::PanicInfo) -> ! {
     // and signal to the host that the message can now be read
     write_abort(&[0xFF]);
     unreachable!();
+}
+
+/// Triggers a VM exit to flush the current events to the host.
+#[cfg(feature = "trace_guest")]
+fn send_to_host(data: &[u8]) {
+    unsafe {
+        core::arch::asm!("out dx, al",
+            // Port value for tracing
+            in("dx") OutBAction::GuestEvent as u16,
+            in("al") 0u8,
+            // Additional magic number to identify the action
+            in("r8") OutBAction::GuestEvent as u64,
+            in("r9") data.as_ptr() as u64,
+            in("r10") data.len() as u64,
+        );
+    }
+}
+
+#[cfg(feature = "trace_guest")]
+fn initialize_encoder() {
+    EVENTS_ENCODER.call_once(|| {
+        Arc::new(Mutex::new(EventsBatchEncoder::new(
+            ENCODER_CAPACITY,
+            send_to_host,
+        )))
+    });
 }
 
 // === Entrypoint ===
@@ -227,6 +266,12 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
 
             (*peb_ptr).guest_function_dispatch_ptr = dispatch_function as usize as u64;
 
+            #[cfg(feature = "trace_guest")]
+            {
+                // Initialize the global events encoder
+                initialize_encoder();
+            }
+
             // set up the logger
             let max_log_level = LevelFilter::iter()
                 .nth(max_log_level as usize)
@@ -236,7 +281,13 @@ pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_leve
             // It is important that all the tracing events are produced after the tracing is initialized.
             #[cfg(feature = "trace_guest")]
             if max_log_level != LevelFilter::Off {
-                hyperlight_guest_tracing::init_guest_tracing(guest_start_tsc);
+                hyperlight_guest_tracing::init_guest_tracing(
+                    guest_start_tsc,
+                    EVENTS_ENCODER
+                        .get()
+                        .expect("The EVENTS_ENCODER should have been already initialized")
+                        .clone(),
+                );
             }
 
             #[cfg(feature = "macros")]

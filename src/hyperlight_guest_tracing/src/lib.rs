@@ -45,8 +45,9 @@ pub use trace::{
 #[cfg(feature = "trace")]
 mod trace {
     extern crate alloc;
-    use alloc::sync::{Arc, Weak};
+    use alloc::sync::Arc;
 
+    use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
     use spin::Mutex;
 
     use crate::state::GuestState;
@@ -58,21 +59,22 @@ mod trace {
     /// - The guest tracing API, when we want manual control to flush the events to the host
     ///
     /// The mutex ensures safe access to the state from both places.
-    static GUEST_STATE: spin::Once<Weak<Mutex<GuestState>>> = spin::Once::new();
+    static GUEST_STATE: spin::Once<Arc<Mutex<GuestState>>> = spin::Once::new();
 
     /// Initialize the guest tracing subscriber as global default.
-    pub fn init_guest_tracing(guest_start_tsc: u64) {
+    pub fn init_guest_tracing(guest_start_tsc: u64, encoder: Arc<Mutex<EventsBatchEncoder>>) {
         // Set as global default if not already set.
         if tracing_core::dispatcher::has_been_set() {
             return;
         }
-        let sub = GuestSubscriber::new(guest_start_tsc);
-        let state = sub.state();
-        // Store state Weak<GuestState> to use later at runtime
-        GUEST_STATE.call_once(|| Arc::downgrade(state));
+
+        let state = Arc::new(Mutex::new(GuestState::new(guest_start_tsc, encoder)));
+        let sub = GuestSubscriber::new(state.clone());
 
         // Set global dispatcher
         let _ = tracing_core::dispatcher::set_global_default(tracing_core::Dispatch::new(sub));
+
+        GUEST_STATE.call_once(|| state);
     }
 
     /// Ends the current trace by ending all active spans in the
@@ -84,9 +86,7 @@ mod trace {
     ///
     /// NOTE: Panics if unable to lock the guest state.
     pub fn end_trace() {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
-        {
+        if let Some(state_mutex) = GUEST_STATE.get() {
             // We want to protect against re-entrancy issues produced by tracing code that locks
             // the state and then causes an exception that tries to lock the state again.
             //
@@ -108,9 +108,7 @@ mod trace {
     /// Flushes the current trace data to prepare it for reading by the host.
     /// NOTE: Panics if unable to lock the guest state.
     pub fn flush() {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
-        {
+        if let Some(state_mutex) = GUEST_STATE.get() {
             // We want to protect against re-entrancy issues produced by tracing code that locks
             // the state and then causes an exception that tries to lock the state again.
             //
@@ -134,9 +132,7 @@ mod trace {
     /// This clears any existing spans/events from previous calls ensuring a clean state.
     /// NOTE: Panics if unable to lock the guest state.
     pub fn new_call(guest_start_tsc: u64) {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
-        {
+        if let Some(state_mutex) = GUEST_STATE.get() {
             // We want to protect against re-entrancy issues produced by tracing code that locks
             // the state and then causes an exception that tries to lock the state again.
             //
@@ -161,9 +157,7 @@ mod trace {
     /// are still active (in the stack) and remove all other spans and events.
     /// NOTE: Panics if unable to lock the guest state.
     pub fn reset() {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
-        {
+        if let Some(state_mutex) = GUEST_STATE.get() {
             // We want to protect against re-entrancy issues produced by tracing code that locks
             // the state and then causes an exception that tries to lock the state again.
             //
@@ -185,9 +179,7 @@ mod trace {
 
     /// Returns information about the current trace state needed by the host to read the spans.
     pub fn serialized_data() -> Option<(u64, u64)> {
-        if let Some(w) = GUEST_STATE.get()
-            && let Some(state_mutex) = w.upgrade()
-        {
+        if let Some(state_mutex) = GUEST_STATE.get() {
             // We want to protect against re-entrancy issues produced by tracing code that locks
             // the state and then causes an exception that tries to lock the state again.
             //
@@ -211,9 +203,6 @@ mod trace {
 
     /// Returns true if tracing is enabled (the guest tracing state is initialized).
     pub fn is_trace_enabled() -> bool {
-        GUEST_STATE
-            .get()
-            .map(|w| w.upgrade().is_some())
-            .unwrap_or(false)
+        GUEST_STATE.get().is_some()
     }
 }

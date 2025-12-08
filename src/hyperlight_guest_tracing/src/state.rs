@@ -16,12 +16,13 @@ limitations under the License.
 extern crate alloc;
 
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hyperlight_common::outb::OutBAction;
 use hyperlight_common::flatbuffer_wrappers::guest_trace_data::EventsBatchEncoder;
 use hyperlight_common::outb::{EventsEncoder, GuestEvent};
+use spin::Mutex;
 use tracing_core::Event;
 use tracing_core::span::{Attributes, Id, Record};
 
@@ -35,43 +36,29 @@ pub struct TraceBatchInfo {
 /// Internal state of the tracing subscriber
 pub(crate) struct GuestState {
     /// Encoder for events
-    encoder: EventsBatchEncoder,
+    encoder: Arc<Mutex<EventsBatchEncoder>>,
     /// Next span ID to allocate
     next_id: AtomicU64,
     /// Stack of active spans
     stack: Vec<u64>,
 }
 
-/// TODO: Change these constant to be configurable at runtime by the guest
-/// Maybe use a weak symbol that the guest can override at link time?
-///
-/// Pre-calculated capacity for the encoder buffer
-/// This is to avoid reallocations in the guest
-const ENCODER_CAPACITY: usize = 4096;
 /// Start with a stack capacity for active spans
 const ACTIVE_SPANS_CAPACITY: usize = 64;
 
-/// Triggers a VM exit to flush the current events to the host.
-fn send_to_host(data: &[u8]) {
-    unsafe {
-        core::arch::asm!("out dx, al",
-            // Port value for tracing
-            in("dx") OutBAction::GuestEvent as u16,
-            in("al") 0u8,
-            // Additional magic number to identify the action
-            in("r8") OutBAction::GuestEvent as u64,
-            in("r9") data.as_ptr() as u64,
-            in("r10") data.len() as u64,
-        );
-    }
-}
-
 impl GuestState {
-    pub(crate) fn new(guest_start_tsc: u64) -> Self {
-        let mut encoder = EventsBatchEncoder::new(ENCODER_CAPACITY, send_to_host);
-        encoder.encode(&GuestEvent::GuestStart {
-            tsc: guest_start_tsc,
-        });
+    pub(crate) fn new(guest_start_tsc: u64, encoder: Arc<Mutex<EventsBatchEncoder>>) -> Self {
+        if let Some(mut enc) = encoder.try_lock() {
+            enc.encode(&GuestEvent::GuestStart {
+                tsc: guest_start_tsc,
+            });
+        } else {
+            // The Guest state is a global Mutex, so we try to lock it.
+            // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a
+            panic!("GuestState: unable to lock EventsBatchEncoder on initialization");
+        }
 
         Self {
             encoder,
@@ -97,22 +84,49 @@ impl GuestState {
     pub(crate) fn flush(&mut self) {
         // End all spans which serializes them and might require multiple outb calls
         self.end_trace();
-        self.encoder.flush();
+
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on flush");
+
+        enc.flush();
     }
 
     /// Prepare the trace state for a new guest function call
     /// This resets the internal serializer and adds a GuestStart event
     /// with the provided start timestamp counter (TSC)
     pub(crate) fn new_call(&mut self, start_tsc: u64) {
-        self.encoder.reset();
-        self.encoder
-            .encode(&GuestEvent::GuestStart { tsc: start_tsc });
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on new_call");
+
+        enc.reset();
+        enc.encode(&GuestEvent::GuestStart { tsc: start_tsc });
     }
 
     /// Reset the trace state, clearing all existing spans and events
     /// This is called after the trace has been flushed to the host
     pub(crate) fn reset(&mut self) {
-        self.encoder.reset();
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on reset");
+
+        enc.reset();
     }
 
     /// Closes the trace by ending all spans
@@ -126,20 +140,34 @@ impl GuestState {
                 tsc: invariant_tsc::read_tsc(),
             };
 
+            // The Guest state is a global Mutex, so we try to lock it.
+            // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+            // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+            // (e.g. a re-entrant call, a panic that tries to create a
+            let mut enc = self
+                .encoder
+                .try_lock()
+                .expect("GuestState: unable to lock EventsBatchEncoder on end_trace");
+
             // Serialize the event
-            self.encoder.encode(&event);
+            enc.encode(&event);
         }
     }
 
     /// Return (ptr, len) for serialized data if any is available
     pub(crate) fn serialized_data(&self) -> Option<(u64, u64)> {
-        let data = self.encoder.finish();
+        self.encoder
+            .try_lock()
+            .map(|enc| {
+                let data = enc.finish();
 
-        if data.is_empty() {
-            None
-        } else {
-            Some((data.as_ptr() as u64, data.len() as u64))
-        }
+                if data.is_empty() {
+                    None
+                } else {
+                    Some((data.as_ptr() as u64, data.len() as u64))
+                }
+            })
+            .unwrap_or(None)
     }
 
     /// Create a new span and push it on the stack
@@ -166,8 +194,17 @@ impl GuestState {
             fields,
         };
 
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on new_span");
+
         // Serialize the event
-        self.encoder.encode(&event);
+        enc.encode(&event);
 
         id
     }
@@ -190,8 +227,17 @@ impl GuestState {
             fields,
         };
 
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on event");
+
         // Serialize the event
-        self.encoder.encode(&event);
+        enc.encode(&event);
     }
 
     /// Record new values for an existing span
@@ -204,8 +250,17 @@ impl GuestState {
             fields: v,
         };
 
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on record");
+
         // Serialize the event
-        self.encoder.encode(&event);
+        enc.encode(&event);
     }
 
     /// Enter a span (push it on the stack)
@@ -228,8 +283,17 @@ impl GuestState {
             tsc: invariant_tsc::read_tsc(),
         };
 
+        // The Guest state is a global Mutex, so we try to lock it.
+        // in case we cannot lock the state, we panic to avoid inconsistent tracing data,
+        // and potential deadlocks. If we cannot lock the state, something is seriously wrong
+        // (e.g. a re-entrant call, a panic that tries to create a
+        let mut enc = self
+            .encoder
+            .try_lock()
+            .expect("GuestState: unable to lock EventsBatchEncoder on try_close");
+
         // Serialize the event
-        self.encoder.encode(&event);
+        enc.encode(&event);
 
         true
     }

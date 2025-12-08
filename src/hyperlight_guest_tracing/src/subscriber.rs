@@ -34,13 +34,8 @@ pub(crate) struct GuestSubscriber {
 }
 
 impl GuestSubscriber {
-    pub(crate) fn new(guest_start_tsc: u64) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(GuestState::new(guest_start_tsc))),
-        }
-    }
-    pub(crate) fn state(&self) -> &Arc<Mutex<GuestState>> {
-        &self.state
+    pub(crate) fn new(state: Arc<Mutex<GuestState>>) -> Self {
+        Self { state }
     }
 }
 
