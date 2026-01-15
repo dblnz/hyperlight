@@ -20,6 +20,10 @@ use log::LevelFilter;
 #[cfg(gdb)]
 pub(crate) mod gdb;
 
+/// DAP (Debug Adapter Protocol) debugging support
+#[cfg(dap)]
+pub(crate) mod dap;
+
 /// Abstracts over different hypervisor register representations
 pub(crate) mod regs;
 
