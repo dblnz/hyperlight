@@ -14,14 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(gdb)]
+#[cfg(any(gdb, dap))]
 use std::sync::{Arc, Mutex};
 
 use rand::Rng;
 use tracing::{Span, instrument};
 
 use super::SandboxConfiguration;
-#[cfg(any(crashdump, gdb))]
+#[cfg(any(crashdump, gdb, dap))]
 use super::uninitialized::SandboxRuntimeConfig;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::exe::LoadInfo;
@@ -31,6 +31,8 @@ use crate::mem::ptr_offset::Offset;
 use crate::mem::shared_mem::GuestSharedMemory;
 #[cfg(gdb)]
 use crate::sandbox::config::DebugInfo;
+#[cfg(dap)]
+use crate::sandbox::config::DapInfo;
 #[cfg(feature = "mem_profile")]
 use crate::sandbox::trace::MemTraceInfo;
 #[cfg(target_os = "linux")]
@@ -43,7 +45,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     let mut vm = set_up_hypervisor_partition(
         &mut gshm,
         &u_sbox.config,
-        #[cfg(any(crashdump, gdb))]
+        #[cfg(any(crashdump, gdb, dap))]
         &u_sbox.rt_cfg,
         u_sbox.load_info,
     )?;
@@ -86,6 +88,22 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     #[cfg(gdb)]
     let dbg_mem_wrapper = Arc::new(Mutex::new(hshm.clone()));
 
+    // Create DAP thread if dap is enabled and the configuration is provided
+    #[cfg(dap)]
+    if let Some(DapInfo { port }) = u_sbox.rt_cfg.dap_info {
+        use crate::hypervisor::dap::create_dap_thread;
+
+        match create_dap_thread(port) {
+            Ok(channel) => {
+                // Set the channel on the DAP context so the host function can use it
+                u_sbox.dap_context.set_channel(channel);
+            }
+            Err(e) => {
+                log::error!("Could not create DAP connection: {:#}", e);
+            }
+        }
+    }
+
     Ok(MultiUseSandbox::from_uninit(
         u_sbox.host_funcs,
         hshm,
@@ -99,7 +117,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
 pub(crate) fn set_up_hypervisor_partition(
     mgr: &mut SandboxMemoryManager<GuestSharedMemory>,
     #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
-    #[cfg(any(crashdump, gdb))] rt_cfg: &SandboxRuntimeConfig,
+    #[cfg(any(crashdump, gdb, dap))] rt_cfg: &SandboxRuntimeConfig,
     _load_info: LoadInfo,
 ) -> Result<HyperlightVm> {
     let base_ptr = GuestPtr::try_from(Offset::from(0))?;

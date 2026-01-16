@@ -41,13 +41,20 @@ limitations under the License.
 //! ```
 
 mod comm;
+mod context;
 mod errors;
+mod host_funcs;
 mod messages;
 mod protocol;
 mod server;
 
 pub use comm::DapCommChannel;
+pub use context::{DapContext, SharedDapContext, create_shared_dap_context};
 pub use errors::DapError;
+pub use host_funcs::{
+    DebugAction, DebugActionType, DebugBreakEvent, DebugBreakReason, DebugBreakpoint,
+    DebugLocation, DebugStackFrame, DEBUG_BREAK_FUNC_NAME, handle_debug_break,
+};
 pub use messages::{
     Breakpoint, DapRequest, DapResponse, Scope, SourceLocation, StackFrame, StopReason, Variable,
 };
