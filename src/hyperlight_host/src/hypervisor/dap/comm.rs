@@ -50,6 +50,7 @@ use super::errors::DapError;
 /// // Server receives the response
 /// let response = server_chan.recv()?;
 /// ```
+#[derive(Debug)]
 pub struct DapCommChannel<T, U> {
     /// Transmit channel for sending messages
     tx: Sender<T>,

@@ -13,14 +13,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#[cfg(gdb)]
+
+#[cfg(any(gdb, dap))]
 use std::sync::{Arc, Mutex};
 
 use rand::RngExt;
 use tracing::{Span, instrument};
 
 use super::SandboxConfiguration;
-#[cfg(any(crashdump, gdb))]
+#[cfg(any(crashdump, gdb, dap))]
 use super::uninitialized::SandboxRuntimeConfig;
 use crate::hypervisor::hyperlight_vm::{HyperlightVm, HyperlightVmError};
 use crate::mem::exe::LoadInfo;
@@ -29,6 +30,8 @@ use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::GuestSharedMemory;
 #[cfg(gdb)]
 use crate::sandbox::config::DebugInfo;
+#[cfg(dap)]
+use crate::sandbox::config::DapInfo;
 #[cfg(feature = "mem_profile")]
 use crate::sandbox::trace::MemTraceInfo;
 #[cfg(target_os = "linux")]
@@ -63,8 +66,11 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         &u_sbox.config,
         u_sbox.stack_top_gva,
         page_size as usize,
-        #[cfg(any(crashdump, gdb))]
-        u_sbox.rt_cfg,
+        // TODO: Temp workaround takes ownership of the entire runtime config,
+        // but we should refactor to only pass the fields needed by the VM layer
+        // (e.g. DAP config for DAP thread creation, which currently happens inside set_up_hypervisor_partition).
+        #[cfg(any(crashdump, dap, gdb))]
+        u_sbox.rt_cfg.clone(),
         u_sbox.load_info,
     )?;
 
@@ -134,6 +140,22 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     #[cfg(gdb)]
     let dbg_mem_wrapper = Arc::new(Mutex::new(hshm.clone()));
 
+    // Create DAP thread if dap is enabled and the configuration is provided
+    #[cfg(dap)]
+    if let Some(DapInfo { port }) = u_sbox.rt_cfg.dap_info {
+        use crate::hypervisor::dap::create_dap_thread;
+
+        match create_dap_thread(port) {
+            Ok(channel) => {
+                // Set the channel on the DAP context so the host function can use it
+                u_sbox.dap_context.set_channel(channel);
+            }
+            Err(e) => {
+                log::error!("Could not create DAP connection: {:#}", e);
+            }
+        }
+    }
+
     Ok(MultiUseSandbox::from_uninit(
         u_sbox.host_funcs,
         hshm,
@@ -148,7 +170,7 @@ pub(crate) fn set_up_hypervisor_partition(
     #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
     stack_top_gva: u64,
     page_size: usize,
-    #[cfg(any(crashdump, gdb))] rt_cfg: SandboxRuntimeConfig,
+    #[cfg(any(crashdump, dap, gdb))] rt_cfg: SandboxRuntimeConfig,
     _load_info: LoadInfo,
 ) -> Result<HyperlightVm> {
     // Create gdb thread if gdb is enabled and the configuration is provided

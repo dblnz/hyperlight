@@ -37,13 +37,15 @@ use crate::mem::shared_mem::{ExclusiveSharedMemory, SharedMemory};
 use crate::sandbox::SandboxConfiguration;
 use crate::{MultiUseSandbox, Result, new_error};
 
-#[cfg(any(crashdump, gdb))]
+#[cfg(any(crashdump, gdb, dap))]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SandboxRuntimeConfig {
     #[cfg(crashdump)]
     pub(crate) binary_path: Option<String>,
     #[cfg(gdb)]
     pub(crate) debug_info: Option<super::config::DebugInfo>,
+    #[cfg(dap)]
+    pub(crate) dap_info: Option<super::config::DapInfo>,
     #[cfg(crashdump)]
     pub(crate) guest_core_dump: bool,
     /// The original entry point address of the loaded guest binary
@@ -164,7 +166,7 @@ pub struct UninitializedSandbox {
     pub(crate) mgr: SandboxMemoryManager<ExclusiveSharedMemory>,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
     pub(crate) config: SandboxConfiguration,
-    #[cfg(any(crashdump, gdb))]
+    #[cfg(any(crashdump, gdb, dap))]
     pub(crate) rt_cfg: SandboxRuntimeConfig,
     pub(crate) load_info: crate::mem::exe::LoadInfo,
     // This is needed to convey the stack pointer between the snapshot
@@ -184,6 +186,9 @@ pub struct UninitializedSandbox {
     /// File mappings prepared by [`Self::map_file_cow`] that will be
     /// applied to the VM during [`Self::evolve`].
     pub(crate) pending_file_mappings: Vec<super::file_mapping::PreparedFileMapping>,
+    /// Shared DAP context for debug_break host function
+    #[cfg(dap)]
+    pub(crate) dap_context: crate::hypervisor::dap::SharedDapContext,
 }
 
 impl Debug for UninitializedSandbox {
@@ -340,7 +345,7 @@ impl UninitializedSandbox {
 
         let sandbox_cfg = cfg.unwrap_or_default();
 
-        #[cfg(any(crashdump, gdb))]
+        #[cfg(any(crashdump, gdb, dap))]
         let rt_cfg = {
             #[cfg(crashdump)]
             let guest_core_dump = sandbox_cfg.get_guest_core_dump();
@@ -348,11 +353,16 @@ impl UninitializedSandbox {
             #[cfg(gdb)]
             let debug_info = sandbox_cfg.get_guest_debug_info();
 
+            #[cfg(dap)]
+            let dap_info = sandbox_cfg.get_guest_dap_info();
+
             SandboxRuntimeConfig {
                 #[cfg(crashdump)]
                 binary_path,
                 #[cfg(gdb)]
                 debug_info,
+                #[cfg(dap)]
+                dap_info,
                 #[cfg(crashdump)]
                 guest_core_dump,
                 // entry_point is set later in set_up_hypervisor_partition
@@ -367,12 +377,16 @@ impl UninitializedSandbox {
 
         let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
 
+        // Create DAP context if DAP is enabled
+        #[cfg(dap)]
+        let dap_context = crate::hypervisor::dap::create_shared_dap_context();
+
         let mut sandbox = Self {
             host_funcs,
             mgr: mem_mgr_wrapper,
             max_guest_log_level: None,
             config: sandbox_cfg,
-            #[cfg(any(crashdump, gdb))]
+            #[cfg(any(crashdump, gdb, dap))]
             rt_cfg,
             load_info: snapshot.load_info(),
             stack_top_gva: snapshot.stack_top_gva(),
@@ -381,10 +395,18 @@ impl UninitializedSandbox {
             #[cfg(feature = "nanvix-unstable")]
             counter_taken: std::sync::atomic::AtomicBool::new(false),
             pending_file_mappings: Vec::new(),
+            #[cfg(dap)]
+            dap_context,
         };
 
         // If we were passed a writer for host print register it otherwise use the default.
         sandbox.register_print(default_writer_func)?;
+
+        // Register DAP debug_break host function if DAP is enabled
+        #[cfg(dap)]
+        if sandbox_cfg.get_guest_dap_info().is_some() {
+            sandbox.register_debug_break()?;
+        }
 
         crate::debug!("Sandbox created:  {:#?}", sandbox);
 
@@ -559,6 +581,57 @@ impl UninitializedSandbox {
         {
             *self.deferred_hshm.lock().unwrap() = Some(hshm);
         }
+    }
+
+    /// Registers the DAP debug_break host function.
+    ///
+    /// This function is called by the guest to report debug events (breakpoints, steps, etc.)
+    /// and receive debugger commands (continue, step over, etc.).
+    ///
+    /// The function signature is: `fn(event_json: String) -> String`
+    /// - Input: JSON-encoded `DebugBreakEvent`
+    /// - Output: JSON-encoded `DebugAction`
+    #[cfg(dap)]
+    fn register_debug_break(&mut self) -> Result<()> {
+        use crate::hypervisor::dap::{
+            DEBUG_BREAK_FUNC_NAME, DebugAction, DebugActionType, DebugBreakEvent,
+        };
+
+        let dap_context = self.dap_context.clone();
+
+        let debug_break_fn = move |event_json: String| -> String {
+            // Parse the event from JSON
+            let event: DebugBreakEvent = match serde_json::from_str(&event_json) {
+                Ok(e) => e,
+                Err(err) => {
+                    log::error!("Failed to parse debug break event: {}", err);
+                    // Return continue action on parse error
+                    let action = DebugAction {
+                        action: DebugActionType::Continue,
+                        breakpoints: vec![],
+                    };
+                    return serde_json::to_string(&action).unwrap_or_default();
+                }
+            };
+
+            log::debug!(
+                "Debug break: {:?} at {}:{}",
+                event.reason,
+                event.location.filename,
+                event.location.line
+            );
+
+            // Handle the break event (this blocks until debugger sends continue/step)
+            let action = dap_context.handle_break(event);
+
+            // Serialize and return the action
+            serde_json::to_string(&action).unwrap_or_else(|e| {
+                log::error!("Failed to serialize debug action: {}", e);
+                String::from(r#"{"action":"continue","breakpoints":[]}"#)
+            })
+        };
+
+        self.register(DEBUG_BREAK_FUNC_NAME, debug_break_fn)
     }
 }
 // Check to see if the current version of Windows is supported

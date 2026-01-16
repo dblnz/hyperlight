@@ -21,11 +21,23 @@ use std::time::Duration;
 use libc::c_int;
 use tracing::{Span, instrument};
 
-/// Used for passing debug configuration to a sandbox
+/// Used for passing debug configuration to a sandbox (GDB)
 #[cfg(gdb)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DebugInfo {
     /// Guest debug port
+    pub port: u16,
+}
+
+/// Used for passing Debug Adapter Protocol (DAP) configuration to a sandbox.
+///
+/// DAP enables debugging of guest code (e.g., JavaScript runtimes) from IDEs
+/// like VS Code. When configured, a DAP server will be started that listens
+/// on the specified port for debugger connections.
+#[cfg(dap)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DapInfo {
+    /// Port on which the DAP server will listen for debugger connections
     pub port: u16,
 }
 
@@ -44,6 +56,9 @@ pub struct SandboxConfiguration {
     /// Guest gdb debug port
     #[cfg(gdb)]
     guest_debug_info: Option<DebugInfo>,
+    /// Guest DAP debug configuration
+    #[cfg(dap)]
+    guest_dap_info: Option<DapInfo>,
     /// The size of the memory buffer that is made available for input to the
     /// Guest Binary
     input_data_size: usize,
@@ -105,6 +120,7 @@ impl SandboxConfiguration {
         interrupt_retry_delay: Duration,
         interrupt_vcpu_sigrtmin_offset: u8,
         #[cfg(gdb)] guest_debug_info: Option<DebugInfo>,
+        #[cfg(dap)] guest_dap_info: Option<DapInfo>,
         #[cfg(crashdump)] guest_core_dump: bool,
     ) -> Self {
         Self {
@@ -116,6 +132,8 @@ impl SandboxConfiguration {
             interrupt_vcpu_sigrtmin_offset,
             #[cfg(gdb)]
             guest_debug_info,
+            #[cfg(dap)]
+            guest_dap_info,
             #[cfg(crashdump)]
             guest_core_dump,
         }
@@ -194,6 +212,16 @@ impl SandboxConfiguration {
         self.guest_debug_info = Some(debug_info);
     }
 
+    /// Sets the DAP (Debug Adapter Protocol) configuration for the guest.
+    ///
+    /// When configured, a DAP server will be started that listens on the specified
+    /// port for debugger connections (e.g., from VS Code).
+    #[cfg(dap)]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub fn set_guest_dap_info(&mut self, dap_info: DapInfo) {
+        self.guest_dap_info = Some(dap_info);
+    }
+
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_input_data_size(&self) -> usize {
         self.input_data_size
@@ -227,6 +255,12 @@ impl SandboxConfiguration {
         self.guest_debug_info
     }
 
+    #[cfg(dap)]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn get_guest_dap_info(&self) -> Option<DapInfo> {
+        self.guest_dap_info
+    }
+
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn heap_size_override_opt(&self) -> Option<u64> {
         (self.heap_size_override > 0).then_some(self.heap_size_override)
@@ -253,6 +287,8 @@ impl Default for SandboxConfiguration {
             Self::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
             #[cfg(gdb)]
             None,
+            #[cfg(dap)]
+            None,
             #[cfg(crashdump)]
             true,
         )
@@ -277,6 +313,8 @@ mod tests {
             SandboxConfiguration::DEFAULT_INTERRUPT_RETRY_DELAY,
             SandboxConfiguration::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
             #[cfg(gdb)]
+            None,
+            #[cfg(dap)]
             None,
             #[cfg(crashdump)]
             true,
