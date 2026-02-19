@@ -26,6 +26,8 @@ use opentelemetry::trace::{Span as _, TraceContextExt, Tracer as _};
 use opentelemetry::{Context, KeyValue, global};
 use tracing::span::{EnteredSpan, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+#[cfg(feature = "tracy_guest")]
+use tracy_client::{Client as TracyClient, GpuContext, GpuContextType, GpuSpan};
 
 use crate::hypervisor::regs::CommonRegisters;
 use crate::mem::layout::SandboxMemoryLayout;
@@ -122,6 +124,14 @@ pub struct TraceContext {
     /// The frequency of the timestamp counter.
     tsc_freq: Option<u64>,
     current_parent_ctx: Option<Context>,
+
+    /// Tracy GPU context for emitting guest spans with precise TSC timestamps.
+    /// Lazily initialized when the TSC frequency is first calculated.
+    #[cfg(feature = "tracy_guest")]
+    tracy_gpu_ctx: Option<GpuContext>,
+    /// Map of guest span id to Tracy GPU span, for spans that are still open.
+    #[cfg(feature = "tracy_guest")]
+    tracy_spans: HashMap<u64, GpuSpan>,
 }
 
 impl TraceContext {
@@ -151,6 +161,11 @@ impl TraceContext {
             start_tsc: None,
             tsc_freq: None,
             current_parent_ctx: None,
+
+            #[cfg(feature = "tracy_guest")]
+            tracy_gpu_ctx: None,
+            #[cfg(feature = "tracy_guest")]
+            tracy_spans: HashMap::new(),
         }
     }
 
@@ -241,6 +256,34 @@ impl TraceContext {
                         self.calculate_tsc_freq()?;
                     }
                     self.start_tsc = Some(tsc);
+
+                    // Initialize Tracy GPU context once we know the TSC frequency.
+                    // We use the GPU context API because it is the only Tracy mechanism
+                    // that allows providing explicit timestamps (the raw TSC values from
+                    // the guest).
+                    #[cfg(feature = "tracy_guest")]
+                    if self.tracy_gpu_ctx.is_none() {
+                        if let Some(tsc_freq) = self.tsc_freq {
+                            let period = 1_000_000_000.0 / tsc_freq as f32;
+                            let client = TracyClient::start();
+                            match client.new_gpu_context(
+                                Some("GuestVM"),
+                                GpuContextType::Invalid,
+                                tsc as i64,
+                                period,
+                            ) {
+                                Ok(ctx) => {
+                                    self.tracy_gpu_ctx = Some(ctx);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to create Tracy GPU context: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
                 GuestEvent::EditSpan { id, fields } => {
                     // Edit existing span attributes
@@ -309,6 +352,27 @@ impl TraceContext {
                     // Store the span
                     self.guest_spans.insert(id, span);
                     spans_stack.push(id);
+
+                    // Emit a Tracy GPU span with the exact TSC start timestamp.
+                    // Timestamps must be uploaded in monotonically increasing order
+                    // across all spans in the context, which is guaranteed because
+                    // guest events arrive in chronological TSC order.
+                    #[cfg(feature = "tracy_guest")]
+                    if let Some(gpu_ctx) = &self.tracy_gpu_ctx {
+                        match gpu_ctx.span_alloc(&name, &target, "guest", 0) {
+                            Ok(gpu_span) => {
+                                gpu_span.upload_timestamp_start(tsc as i64);
+                                self.tracy_spans.insert(id, gpu_span);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to create Tracy GPU span for guest span {}: {}",
+                                    id,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
                 GuestEvent::CloseSpan { id, tsc } => {
                     let start_tsc = self.start_tsc.ok_or(new_error!(
@@ -327,6 +391,14 @@ impl TraceContext {
                         }
                     } else {
                         tracing::warn!("Tried to close non-existing guest span with id {}", id);
+                    }
+
+                    // End the corresponding Tracy GPU span and upload the exact
+                    // TSC end timestamp.
+                    #[cfg(feature = "tracy_guest")]
+                    if let Some(mut gpu_span) = self.tracy_spans.remove(&id) {
+                        gpu_span.end_zone();
+                        gpu_span.upload_timestamp_end(tsc as i64);
                     }
                 }
                 GuestEvent::LogEvent {
@@ -402,6 +474,10 @@ impl Drop for TraceContext {
             v.end();
             log::debug!("Dropped guest span with id {}", k);
         }
+        // Drop any remaining Tracy GPU spans. The GpuSpan Drop impl
+        // will call end_zone() automatically if not already ended.
+        #[cfg(feature = "tracy_guest")]
+        self.tracy_spans.clear();
         while let Some(entered) = self.host_spans.pop() {
             entered.exit();
         }
