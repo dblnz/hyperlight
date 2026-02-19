@@ -40,6 +40,7 @@ tracing = { version = "0.1.44", features = ["log"] }
 tracing-log = "0.2.0"
 tracing-core = "0.1.36"
 tracing-opentelemetry = { version = "0.32.1", optional = true }
+tracy-client = { version = "0.18", default-features = false, features = ["enable"], optional = true }
 hyperlight-common = { workspace = true, default-features = true, features = [ "std", "init-paging" ] }
 hyperlight-guest-tracing = { workspace = true, default-features = true, optional = true }
 vmm-sys-util = "0.15.0"
@@ -130,6 +131,7 @@ print_debug = []
 # Dumps the VM state to a file on unexpected errors or crashes. The path of the file will be printed on stdout and logged.
 crashdump = ["dep:chrono"]
 trace_guest = ["dep:opentelemetry", "dep:tracing-opentelemetry", "dep:hyperlight-guest-tracing", "hyperlight-common/trace_guest"]
+tracy_guest = ["trace_guest", "dep:tracy-client"]
 mem_profile = [ "trace_guest", "dep:framehop", "dep:fallible-iterator", "hyperlight-common/mem_profile" ]
 kvm = ["dep:kvm-bindings", "dep:kvm-ioctls"]
 mshv3 = ["dep:mshv-bindings", "dep:mshv-ioctls"]
