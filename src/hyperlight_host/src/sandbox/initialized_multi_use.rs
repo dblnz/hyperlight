@@ -163,7 +163,7 @@ impl MultiUseSandbox {
     /// # }
     /// ```
     #[instrument(err(Debug), skip_all, parent = Span::current())]
-    pub fn snapshot(&mut self) -> Result<Arc<Snapshot>> {
+    pub fn snapshot(&mut self, new_scratch_size: Option<usize>) -> Result<Arc<Snapshot>> {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
@@ -190,6 +190,7 @@ impl MultiUseSandbox {
             stack_top_gpa,
             sregs,
             entrypoint,
+            new_scratch_size,
         )?;
         let snapshot = Arc::new(memory_snapshot);
         self.snapshot = Some(snapshot.clone());
@@ -412,7 +413,7 @@ impl MultiUseSandbox {
         if self.poisoned {
             return Err(crate::HyperlightError::PoisonedSandbox);
         }
-        let snapshot = self.snapshot()?;
+        let snapshot = self.snapshot(None)?;
         let res = self.call(func_name, args);
         self.restore(snapshot)?;
         res

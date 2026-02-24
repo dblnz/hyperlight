@@ -176,7 +176,7 @@ impl UninitializedSandbox {
     //
     // This is ok for now as this is not a public function
     fn from_snapshot(
-        snapshot: Arc<Snapshot>,
+        mut snapshot: Snapshot,
         cfg: Option<SandboxConfiguration>,
         #[cfg(crashdump)] binary_path: Option<String>,
     ) -> Result<Self> {
@@ -212,7 +212,7 @@ impl UninitializedSandbox {
         };
 
         let mut mem_mgr_wrapper =
-            SandboxMemoryManager::<ExclusiveSharedMemory>::from_snapshot(snapshot.as_ref())?;
+            SandboxMemoryManager::<ExclusiveSharedMemory>::from_snapshot(&mut snapshot)?;
 
         mem_mgr_wrapper.write_memory_layout()?;
 
@@ -261,7 +261,7 @@ impl UninitializedSandbox {
         };
         let snapshot = Snapshot::from_env(env, cfg)?;
         Self::from_snapshot(
-            Arc::new(snapshot),
+            snapshot,
             Some(cfg),
             #[cfg(crashdump)]
             binary_path,
