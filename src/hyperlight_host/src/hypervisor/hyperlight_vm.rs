@@ -752,12 +752,26 @@ impl HyperlightVm {
                 #[cfg(feature = "trace_guest")]
                 {
                     tc.end_host_trace();
-                    // Handle the guest trace data if any
-                    let regs = self.vm.regs().map_err(RunVmError::GetRegs)?;
-                    if let Err(e) = tc.handle_trace(&regs, mem_mgr) {
-                        // If no trace data is available, we just log a message and continue
-                        // Is this the right thing to do?
-                        log::debug!("Error handling guest trace: {:?}", e);
+                    match result.as_ref() {
+                        // On the Halt exit we don't receive any trace information
+                        Ok(VmExit::Halt()) => {}
+                        _ => {
+                            // Handle the guest trace data if any
+                            let regs = self.vm.regs().map_err(RunVmError::GetRegs)?;
+                            // If something goes wrong with parsing the trace data, we log the error and
+                            // continue execution instead of returning an error since this is not critical
+                            // to correct execution of the guest
+                            match self.vm.sregs().map(|s| s.cr3) {
+                                Ok(cr3) => {
+                                    tc.handle_trace(&regs, mem_mgr, cr3).unwrap_or_else(|e| {
+                                        tracing::error!("Cannot handle trace data: {}", e);
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to get sregs for trace handling: {e}");
+                                }
+                            }
+                        }
                     }
                 }
                 result

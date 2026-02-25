@@ -169,7 +169,7 @@ fn hash(memory: &[u8], regions: &[MemoryRegion]) -> Result<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-fn access_gpa<'a>(
+pub(crate) fn access_gpa<'a>(
     snap: &'a ExclusiveSharedMemory,
     scratch: &'a ExclusiveSharedMemory,
     scratch_size: usize,
@@ -192,7 +192,7 @@ pub(crate) struct SharedMemoryPageTableBuffer<'a> {
     root: u64,
 }
 impl<'a> SharedMemoryPageTableBuffer<'a> {
-    fn new(
+    pub(crate) fn new(
         snap: &'a ExclusiveSharedMemory,
         scratch: &'a ExclusiveSharedMemory,
         scratch_size: usize,

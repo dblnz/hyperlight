@@ -28,28 +28,31 @@ use tracing::span::{EnteredSpan, Span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::hypervisor::regs::CommonRegisters;
-use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::mgr::SandboxMemoryManager;
-use crate::mem::shared_mem::{HostSharedMemory, SharedMemory};
-use crate::{HyperlightError, Result, new_error};
+use crate::mem::shared_mem::HostSharedMemory;
+use crate::{Result, new_error};
 
 /// Type that helps get the data from the guest provided the registers and memory access
 struct EventsBatch {
     events: Vec<GuestEvent>,
 }
 
-impl
-    TryFrom<(
-        &CommonRegisters,
-        &mut SandboxMemoryManager<HostSharedMemory>,
-    )> for EventsBatch
-{
-    type Error = HyperlightError;
-    fn try_from(
-        (regs, mem_mgr): (
-            &CommonRegisters,
-            &mut SandboxMemoryManager<HostSharedMemory>,
-        ),
+impl EventsBatch {
+    /// Extract a batch of guest trace events from guest memory.
+    ///
+    /// The guest passes the trace data pointer as a Guest Virtual Address (GVA)
+    /// in register r9. With Copy-on-Write enabled, this GVA may not be
+    /// identity-mapped to its physical address, so we walk the guest page
+    /// tables to translate GVA → GPA before reading the data.
+    ///
+    /// # Arguments
+    /// * `regs` - The guest registers (r8 = magic, r9 = GVA pointer, r10 = length)
+    /// * `mem_mgr` - The sandbox memory manager with access to shared and scratch memory
+    /// * `root_pt` - The root page table physical address (CR3) for GVA translation
+    fn from_regs(
+        regs: &CommonRegisters,
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        root_pt: u64,
     ) -> Result<Self> {
         let magic_no = regs.r8;
         let trace_data_ptr = regs.r9 as usize;
@@ -59,42 +62,16 @@ impl
             return Err(new_error!("A TraceBatch is not present"));
         }
 
-        // Extract the GuestTraceData from guest memory
-        // This involves:
-        // 1. Using a mutable reference to the memory manager to get exclusive access to the shared memory.
-        //   This is necessary to ensure that no other part of the code is accessing the memory
-        //   while we are reading from it.
-        // 2. Getting immutable access to the slice of memory that contains the GuestTraceData
-        // 3. Parsing the slice into a GuestTraceData structure
-        //
-        // Error handling is done at each step to ensure that any issues are properly reported.
-        // This includes logging errors for easier debugging.
-        //
-        // The reason for using `with_exclusivity` is to ensure that we have exclusive access
-        // and avoid allocating new memory, which needs to be correctly aligned for the
-        // flatbuffer parsing.
-        let events = mem_mgr.shared_mem.with_exclusivity(|mem| {
-            let buf_slice = mem
-                .as_slice()
-                // Adjust the pointer to be relative to the base address of the sandbox memory
-                .get(
-                    trace_data_ptr - SandboxMemoryLayout::BASE_ADDRESS
-                        ..trace_data_ptr - SandboxMemoryLayout::BASE_ADDRESS + trace_data_len,
-                )
-                // Convert the slice to a Result to handle the case where the slice is out of
-                // bounds and return a proper error message and log the error.
-                .ok_or_else(|| {
-                    tracing::error!("Failed to get guest trace batch slice from guest memory");
-                    new_error!("Failed to get guest trace batch slice from guest memory")
-                })?;
+        // Read the trace data from guest memory by walking the page tables
+        // to translate the GVA to physical addresses. This is necessary
+        // because with CoW, guest virtual pages are backed by physical
+        // pages in the scratch region rather than being identity-mapped.
+        let buf = mem_mgr.read_guest_memory_by_gva(trace_data_gva, trace_data_len, root_pt)?;
 
-            let events = EventsBatchDecoder {}.decode(buf_slice).map_err(|e| {
-                tracing::error!("Failed to deserialize guest trace events: {:?}", e);
-                new_error!("Failed to deserialize guest trace events: {:?}", e)
-            })?;
-
-            Ok::<Vec<GuestEvent>, HyperlightError>(events)
-        })??;
+        let events = EventsBatchDecoder {}.decode(&buf).map_err(|e| {
+            tracing::error!("Failed to deserialize guest trace events: {:?}", e);
+            new_error!("Failed to deserialize guest trace events: {:?}", e)
+        })?;
 
         Ok(EventsBatch { events })
     }
@@ -219,9 +196,10 @@ impl TraceContext {
         &mut self,
         regs: &CommonRegisters,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        root_pt: u64,
     ) -> Result<()> {
         // Get the guest sent info
-        let trace_batch = EventsBatch::try_from((regs, mem_mgr))?;
+        let trace_batch = EventsBatch::from_regs(regs, mem_mgr, root_pt)?;
 
         self.handle_trace_impl(trace_batch.events)
     }
