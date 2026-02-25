@@ -103,9 +103,9 @@ pub(crate) unsafe fn out32(port: u16, val: u32) {
                 asm!("out dx, eax",
                     in("dx") port,
                     in("eax") val,
-                    in("r8") OutBAction::TraceBatch as u64,
-                    in("r9") ptr,
-                    in("r10") len,
+                    in("r12") OutBAction::TraceBatch as u64,
+                    in("r13") ptr,
+                    in("r14") len,
                     options(preserves_flags, nomem, nostack)
                 )
             };

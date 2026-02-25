@@ -60,9 +60,9 @@ fn send_to_host(data: &[u8]) {
             in("dx") OutBAction::TraceBatch as u16,
             in("al") 0u8,
             // Additional magic number to identify the action
-            in("r8") OutBAction::TraceBatch as u64,
-            in("r9") data.as_ptr() as u64,
-            in("r10") data.len() as u64,
+            in("r12") OutBAction::TraceBatch as u64,
+            in("r13") data.as_ptr() as u64,
+            in("r14") data.len() as u64,
         );
     }
 }

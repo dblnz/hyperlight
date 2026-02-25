@@ -54,9 +54,9 @@ impl EventsBatch {
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         root_pt: u64,
     ) -> Result<Self> {
-        let magic_no = regs.r8;
-        let trace_data_ptr = regs.r9 as usize;
-        let trace_data_len = regs.r10 as usize;
+        let magic_no = regs.r12;
+        let trace_data_gva = regs.r13;
+        let trace_data_len = regs.r14 as usize;
 
         if magic_no != OutBAction::TraceBatch as u64 {
             return Err(new_error!("A TraceBatch is not present"));
