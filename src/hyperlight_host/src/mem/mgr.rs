@@ -19,13 +19,15 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{
 };
 use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use hyperlight_common::vmem::{self, PAGE_TABLE_SIZE, PageTableEntry, PhysAddr};
+use hyperlight_common::vmem::{
+    self, BasicMapping, MappingKind, PAGE_TABLE_SIZE, PageTableEntry, PhysAddr,
+};
 use tracing::{Span, instrument};
 
 use super::layout::SandboxMemoryLayout;
-use super::memory_region::MemoryRegion;
 use super::shared_mem::{ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory};
 use crate::hypervisor::regs::CommonSpecialRegisters;
+use crate::mem::memory_region::{MemoryRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::sandbox::snapshot::{NextAction, Snapshot};
 use crate::{Result, new_error};
 
@@ -410,6 +412,153 @@ impl SandboxMemoryManager<HostSharedMemory> {
         })???;
 
         Ok(())
+    }
+
+    /// This function walks the guest page tables and creates memory regions corresponding to the
+    /// guest's view of memory, which are then returned as a vector.
+    ///
+    /// This takes in a mmap_regions parameter which represents the dynamic memory mappings that
+    /// the guest has made, and these are used to determine which pages are actually mapped in the
+    /// guest's page tables.
+    #[cfg(feature = "crashdump")]
+    pub(crate) fn get_guest_memory_regions(
+        &mut self,
+        root_pt: u64,
+        mmap_regions: &Vec<MemoryRegion>,
+    ) -> Result<Vec<MemoryRegion>> {
+        use crate::sandbox::snapshot::{SharedMemoryPageTableBuffer, access_gpa};
+
+        let scratch_size = self.scratch_mem.mem_size();
+
+        let gva = 0usize;
+        let len = hyperlight_common::layout::MAX_GVA;
+        self.shared_mem.with_exclusivity(|snap| {
+            self.scratch_mem.with_exclusivity(|scratch| {
+                let pt_buf = SharedMemoryPageTableBuffer::new(snap, scratch, scratch_size, root_pt);
+
+                // Walk page tables to get all mappings that cover the GVA range
+                let mappings: Vec<_> = unsafe {
+                    hyperlight_common::vmem::virt_to_phys(&pt_buf, gva as u64, len as u64)
+                }
+                .collect();
+
+                if mappings.is_empty() {
+                    return Err(new_error!(
+                        "No page table mappings found for GVA {:#x} (len {})",
+                        gva,
+                        len,
+                    ));
+                }
+
+                let mut regions: Vec<MemoryRegion> = vec![];
+                for mapping in &mappings {
+                    let virt_base = mapping.virt_base as usize;
+                    let virt_end = (mapping.virt_base + mapping.len) as usize;
+                    if let Some((mem, offset)) = access_gpa(snap, scratch, scratch_size, mapping.phys_base) {
+
+                        let (flags, region_type) = match mapping.kind {
+                            MappingKind::Basic(BasicMapping {
+                                readable,
+                                writable,
+                                executable,
+                            }) => {
+                                let mut flags = MemoryRegionFlags::empty();
+                                if readable {
+                                    flags |= MemoryRegionFlags::READ;
+                                }
+                                if writable {
+                                    flags |= MemoryRegionFlags::WRITE;
+                                }
+                                if executable {
+                                    flags |= MemoryRegionFlags::EXECUTE;
+                                }
+                                (flags, MemoryRegionType::Code)
+                            }
+                            MappingKind::Cow(cow) => {
+                                let mut flags = MemoryRegionFlags::empty();
+                                if cow.readable {
+                                    flags |= MemoryRegionFlags::READ;
+                                }
+                                if cow.executable {
+                                    flags |= MemoryRegionFlags::EXECUTE;
+                                }
+                                (flags, MemoryRegionType::Scratch)
+                            }
+                        };
+
+                        if offset >= mem.mem_size() {
+                            let (mem, offset) = access_gpa(snap, scratch, scratch_size, mapping.phys_base)
+                                .ok_or_else(|| {
+                                    new_error!(
+                                        "Failed to resolve GPA {:#x} to host memory GVA {:#x})",
+                                        mapping.phys_base,
+                                        mapping.virt_base,
+                                    )
+                                })?;
+
+                            tracing::error!(
+                                "Mapping for GPA {:#x} has offset {:#x} which is out of bounds for memory of size {:#x}",
+                                mapping.phys_base,
+                                offset,
+                                mem.mem_size(),
+                            );
+                        }
+                        let host_base = mem.base_addr() + offset;
+                        let host_len = (mapping.len as usize).min(mem.mem_size());
+                        let host_end = host_base + host_len;
+
+                        // Try to extend the last region if this page is contiguous
+                        if let Some(last) = regions.last_mut() {
+                            #[allow(clippy::useless_conversion)]
+                            let last_host_end: usize = last.host_region.end.into();
+                            if last.guest_region.end == virt_base
+                                && last_host_end == host_base
+                                && last.flags == flags
+                            {
+                                last.guest_region.end = virt_end;
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    last.host_region.end = host_end;
+                                }
+                                #[cfg(target_os = "windows")]
+                                {
+                                    last.host_region.end = crate::mem::memory_region::HostGuestMemoryRegion::add(
+                                        last.host_region.start,
+                                        gva_end - last.guest_region.start,
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+
+                        regions.push(MemoryRegion {
+                            guest_region: virt_base..virt_end,
+                            host_region: host_base..host_end,
+                            flags,
+                            region_type,
+                        });
+                    } else {
+                        // Check dynamic mmap regions
+                        for rgn in mmap_regions {
+                            if mapping.phys_base as usize >= rgn.guest_region.start && (mapping.phys_base + mapping.len) as usize <= rgn.guest_region.end {
+                                let offset = mapping.phys_base as usize - rgn.guest_region.start;
+                                let host_base: usize = rgn.host_region.start + offset;
+                                let host_end = host_base + mapping.len as usize;
+
+                                regions.push(MemoryRegion {
+                                    guest_region: virt_base..virt_end,
+                                    host_region: host_base..host_end,
+                                    flags: rgn.flags,
+                                    region_type: rgn.region_type,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                Ok(regions)
+            })
+        })??
     }
 
     /// Read guest memory at a Guest Virtual Address (GVA) by walking the

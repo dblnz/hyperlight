@@ -265,6 +265,16 @@ pub enum AccessPageTableError {
     AccessRegs(#[from] RegisterError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CrashDumpError {
+    #[error("Failed to generate crashdump because of a register error: {0}")]
+    GetRegs(#[from] RegisterError),
+    #[error("Failed to get root PT during crashdump generation: {0}")]
+    GetRootPt(#[from] AccessPageTableError),
+    #[error("Failed to get guest memory mapping during crashdump generation")]
+    AccessPageTable,
+}
+
 /// Errors that can occur during HyperlightVm creation
 #[derive(Debug, thiserror::Error)]
 pub enum CreateHyperlightVmError {
@@ -619,7 +629,7 @@ impl HyperlightVm {
     }
 
     /// Get the current base page table physical address
-    pub(crate) fn get_root_pt(&mut self) -> Result<u64, AccessPageTableError> {
+    pub(crate) fn get_root_pt(&self) -> Result<u64, AccessPageTableError> {
         let sregs = self.vm.sregs()?;
 
         // Mask off the flags bits
@@ -896,7 +906,7 @@ impl HyperlightVm {
             Err(e) => {
                 #[cfg(crashdump)]
                 if self.rt_cfg.guest_core_dump {
-                    crashdump::generate_crashdump(self)
+                    crashdump::generate_crashdump(self, mem_mgr)
                         .map_err(|e| RunVmError::CrashdumpGeneration(Box::new(e)))?;
                 }
 
@@ -1130,7 +1140,8 @@ impl HyperlightVm {
     #[cfg(crashdump)]
     pub(crate) fn crashdump_context(
         &self,
-    ) -> std::result::Result<Option<super::crashdump::CrashDumpContext>, RegisterError> {
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+    ) -> std::result::Result<Option<super::crashdump::CrashDumpContext>, CrashDumpError> {
         if self.rt_cfg.guest_core_dump {
             let mut regs = [0; 27];
 
@@ -1194,47 +1205,45 @@ impl HyperlightVm {
             // (identity mapping), so we can emit the raw regions directly.
             #[cfg(feature = "init-paging")]
             let regions = {
-                let mut regions: Vec<MemoryRegion> = Vec::new();
-                if let (Some(snapshot), Some(scratch)) =
-                    (&self.snapshot_memory, &self.scratch_memory)
-                {
-                    let mmap_regions: Vec<MemoryRegion> =
-                        self.get_mapped_regions().cloned().collect();
-                    regions =
-                        crashdump::resolve_gva_regions(snapshot, scratch, &mmap_regions, sregs.cr3);
-                    // Also include dynamic mmap regions at their GVA addresses.
-                    // The page table walk already discovers pages backed by these
-                    // regions, but we include the originals too in case the page
-                    // tables were corrupted and missed some.
-                    for rgn in &mmap_regions {
-                        if !regions.iter().any(|r| {
-                            r.guest_region.start <= rgn.guest_region.start
-                                && r.guest_region.end >= rgn.guest_region.end
-                        }) {
-                            regions.push(rgn.clone());
-                        }
-                    }
+                let mmap_regions: Vec<MemoryRegion> = self.get_mapped_regions().cloned().collect();
 
-                    // Add a zero-filled sentinel page at the stack top GVA.
-                    //
-                    // The dispatch_function is entered by the hypervisor with
-                    // RSP = rsp_gva (MAIN_STACK_TOP_GVA) and no return address
-                    // pushed. When GDB unwinds past dispatch_function, it tries
-                    // to read at rsp_gva to find the caller's return address.
-                    // That page is not mapped in the guest (the stack grows
-                    // downward and ends right at this boundary). Providing a
-                    // zero-filled page here lets GDB read a null return address
-                    // and terminate the backtrace cleanly.
-                    static SENTINEL_PAGE: [u8; 4096] = [0u8; 4096];
-                    let stack_top = self.rsp_gva as usize;
-                    let sentinel_host = SENTINEL_PAGE.as_ptr() as usize;
-                    regions.push(MemoryRegion {
-                        guest_region: stack_top..stack_top + 4096,
-                        host_region: sentinel_host..sentinel_host + 4096,
-                        flags: MemoryRegionFlags::READ,
-                        region_type: MemoryRegionType::Scratch,
-                    });
+                let root_pt = self.get_root_pt()?;
+                let mut regions = mem_mgr
+                    .get_guest_memory_regions(root_pt, &mmap_regions)
+                    .map_err(|_| CrashDumpError::AccessPageTable)?;
+
+                // Also include dynamic mmap regions at their GVA addresses.
+                // The page table walk already discovers pages backed by these
+                // regions, but we include the originals too in case the page
+                // tables were corrupted and missed some.
+                for rgn in &mmap_regions {
+                    if !regions.iter().any(|r| {
+                        r.guest_region.start <= rgn.guest_region.start
+                            && r.guest_region.end >= rgn.guest_region.end
+                    }) {
+                        regions.push(rgn.clone());
+                    }
                 }
+
+                // Add a zero-filled sentinel page at the stack top GVA.
+                //
+                // The dispatch_function is entered by the hypervisor with
+                // RSP = rsp_gva (MAIN_STACK_TOP_GVA) and no return address
+                // pushed. When GDB unwinds past dispatch_function, it tries
+                // to read at rsp_gva to find the caller's return address.
+                // That page is not mapped in the guest (the stack grows
+                // downward and ends right at this boundary). Providing a
+                // zero-filled page here lets GDB read a null return address
+                // and terminate the backtrace cleanly.
+                static SENTINEL_PAGE: [u8; 4096] = [0u8; 4096];
+                let stack_top = self.rsp_gva as usize;
+                let sentinel_host = SENTINEL_PAGE.as_ptr() as usize;
+                regions.push(MemoryRegion {
+                    guest_region: stack_top..stack_top + 4096,
+                    host_region: sentinel_host..sentinel_host + 4096,
+                    flags: MemoryRegionFlags::READ,
+                    region_type: MemoryRegionType::Scratch,
+                });
                 regions
             };
             #[cfg(not(feature = "init-paging"))]
