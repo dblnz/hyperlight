@@ -457,7 +457,7 @@ impl HyperlightVm {
 
     /// Initialise the internally stored vCPU with the given PEB address and
     /// random number seed, then run it until a HLT instruction.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    #[instrument(err(Debug), skip_all, level = "Info")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn initialise(
         &mut self,

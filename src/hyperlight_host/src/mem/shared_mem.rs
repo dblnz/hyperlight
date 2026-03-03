@@ -374,6 +374,7 @@ impl ExclusiveSharedMemory {
         #[cfg(miri)]
         let flags = MAP_ANONYMOUS | MAP_PRIVATE;
 
+        let _entered1 = tracing::span!(tracing::Level::INFO, "mmap").entered();
         let addr = unsafe {
             mmap(
                 null_mut(),
@@ -384,6 +385,7 @@ impl ExclusiveSharedMemory {
                 0 as off_t,
             )
         };
+        _entered1.exit();
         if addr == MAP_FAILED {
             log_then_return!(HyperlightError::MmapFailed(
                 Error::last_os_error().raw_os_error()
@@ -393,12 +395,17 @@ impl ExclusiveSharedMemory {
         // protect the guard pages
         #[cfg(not(miri))]
         {
+            let _entered2 =
+                tracing::span!(tracing::Level::INFO, "mprotect guard pages 1").entered();
             let res = unsafe { mprotect(addr, PAGE_SIZE_USIZE, PROT_NONE) };
             if res != 0 {
                 return Err(HyperlightError::MprotectFailed(
                     Error::last_os_error().raw_os_error(),
                 ));
             }
+            _entered2.exit();
+            let _entered3 =
+                tracing::span!(tracing::Level::INFO, "mprotect guard pages 2").entered();
             let res = unsafe {
                 mprotect(
                     (addr as *const u8).add(total_size - PAGE_SIZE_USIZE) as *mut c_void,
@@ -406,6 +413,7 @@ impl ExclusiveSharedMemory {
                     PROT_NONE,
                 )
             };
+            _entered3.exit();
             if res != 0 {
                 return Err(HyperlightError::MprotectFailed(
                     Error::last_os_error().raw_os_error(),

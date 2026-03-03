@@ -124,7 +124,7 @@ impl TraceContext {
 
         let current_ctx = Span::current().context();
 
-        let span = tracing::trace_span!("call-to-guest");
+        let span = tracing::info_span!("call-to-guest");
         let _ = span.set_parent(current_ctx);
         let entered = span.entered();
 
@@ -254,10 +254,7 @@ impl TraceContext {
                                     self.tracy_gpu_ctx = Some(ctx);
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to create Tracy GPU context: {}",
-                                        e
-                                    );
+                                    tracing::warn!("Failed to create Tracy GPU context: {}", e);
                                 }
                             }
                         }

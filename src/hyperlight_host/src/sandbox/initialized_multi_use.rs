@@ -163,18 +163,29 @@ impl MultiUseSandbox {
         if let Some(snapshot) = &self.snapshot {
             return Ok(snapshot.clone());
         }
+        let _entered1 = tracing::span!(tracing::Level::TRACE, "get_mapped_regions").entered();
         let mapped_regions_iter = self.vm.get_mapped_regions();
+        _entered1.exit();
         let mapped_regions_vec: Vec<MemoryRegion> = mapped_regions_iter.cloned().collect();
+        let _entered2 = tracing::span!(tracing::Level::TRACE, "get_root_pt").entered();
         let root_pt_gpa = self
             .vm
             .get_root_pt()
             .map_err(|e| HyperlightError::HyperlightVmError(e.into()))?;
+        _entered2.exit();
+        let _entered3 = tracing::span!(tracing::Level::TRACE, "get_stack_top").entered();
         let stack_top_gpa = self.vm.get_stack_top();
+        _entered3.exit();
+        let _entered4 = tracing::span!(tracing::Level::TRACE, "get_sregs").entered();
         let sregs = self
             .vm
             .get_snapshot_sregs()
             .map_err(|e| HyperlightError::HyperlightVmError(e.into()))?;
+        _entered4.exit();
+        let _entered5 = tracing::span!(tracing::Level::TRACE, "get_entrypoint").entered();
         let entrypoint = self.vm.get_entrypoint();
+        _entered5.exit();
+        let _entered6 = tracing::span!(tracing::Level::TRACE, "mem_mgr.snapshot").entered();
         let memory_snapshot = self.mem_mgr.snapshot(
             self.id,
             mapped_regions_vec,
@@ -184,8 +195,11 @@ impl MultiUseSandbox {
             entrypoint,
             new_scratch_size,
         )?;
+        _entered6.exit();
         let snapshot = Arc::new(memory_snapshot);
+        let _entered7 = tracing::span!(tracing::Level::TRACE, "snapshot store").entered();
         self.snapshot = Some(snapshot.clone());
+        _entered7.exit();
         Ok(snapshot)
     }
 

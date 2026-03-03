@@ -169,6 +169,7 @@ where
     }
 
     /// Create a snapshot with the given mapped regions
+    #[instrument(err(Debug), skip_all, level = "Info")]
     pub(crate) fn snapshot(
         &mut self,
         sandbox_id: u64,
@@ -196,12 +197,13 @@ where
 }
 
 impl SandboxMemoryManager<ExclusiveSharedMemory> {
+    #[instrument(err(Debug), skip(s), level = "Info")]
     pub(crate) fn from_snapshot(s: &mut Snapshot) -> Result<Self> {
         let layout = *s.layout();
         let mut shared_mem = ExclusiveSharedMemory::new(s.mem_size())?;
-        s.memory.0.with_exclusivity(|e|
-            shared_mem.copy_from_slice(e.as_slice(), 0)
-        )??;
+        s.memory
+            .0
+            .with_exclusivity(|e| shared_mem.copy_from_slice(e.as_slice(), 0))??;
         let scratch_mem = ExclusiveSharedMemory::new(s.layout().get_scratch_size())?;
         let entrypoint = s.entrypoint();
         Ok(Self::new(layout, shared_mem, scratch_mem, entrypoint))

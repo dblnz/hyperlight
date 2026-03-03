@@ -27,7 +27,9 @@ use crate::mem::exe::LoadInfo;
 use crate::mem::layout::SandboxMemoryLayout;
 use crate::mem::memory_region::MemoryRegion;
 use crate::mem::mgr::GuestPageTableBuffer;
-use crate::mem::shared_mem::{ExclusiveSharedMemory, SharedMemory, GuestSharedMemory, HostSharedMemory};
+use crate::mem::shared_mem::{
+    ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, SharedMemory,
+};
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::uninitialized::{GuestBinary, GuestEnvironment};
 
@@ -327,6 +329,7 @@ fn map_specials(pt_buf: &GuestPageTableBuffer, scratch_size: usize) {
 impl Snapshot {
     /// Create a new snapshot from the guest binary identified by `env`. With the configuration
     /// specified in `cfg`.
+    #[instrument(err(Debug), skip(env, cfg), level = "Info")]
     pub(crate) fn from_env<'a, 'b>(
         env: impl Into<GuestEnvironment<'a, 'b>>,
         cfg: SandboxConfiguration,
@@ -439,7 +442,7 @@ impl Snapshot {
     #[allow(clippy::too_many_arguments)]
     /// Take a snapshot of the memory in `shared_mem`, then create a new
     /// instance of `Self` with the snapshot stored therein.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Info")]
     pub(crate) fn new<S: SharedMemory>(
         shared_mem: &mut S,
         scratch_mem: &mut S,
@@ -455,18 +458,22 @@ impl Snapshot {
     ) -> Result<Self> {
         use std::collections::HashMap;
         let mut phys_map = HashMap::<u64, usize>::new();
+        let _entered1 = tracing::span!(tracing::Level::INFO, "get memory").entered();
         let memory = shared_mem.with_exclusivity(|snap_e| {
             scratch_mem.with_exclusivity(|scratch_e| {
                 let orig_scratch_size = layout.get_scratch_size();
 
+                let _entered1 = tracing::span!(tracing::Level::INFO, "count pages").entered();
                 // Pass 1: count how many pages need to live
                 let live_pages =
                     filtered_mappings(snap_e, scratch_e, &regions, orig_scratch_size, root_pt_gpa);
+                _entered1.exit();
 
                 // Pass 2: copy them, and map them
                 // TODO: Look for opportunities to hugepage map
                 let pt_buf = GuestPageTableBuffer::new(layout.get_pt_base_gpa() as usize);
                 let mut snapshot_memory: Vec<u8> = Vec::new();
+                let _entered2 = tracing::span!(tracing::Level::INFO, "copy pages").entered();
                 for (mapping, contents) in live_pages {
                     let kind = match mapping.kind {
                         MappingKind::Cow(cm) => MappingKind::Cow(cm),
@@ -497,25 +504,44 @@ impl Snapshot {
                     };
                     unsafe { vmem::map(&pt_buf, mapping) };
                 }
+                _entered2.exit();
                 // Phase 3: Map the special mappings
-                map_specials(&pt_buf, new_scratch_size.unwrap_or(layout.get_scratch_size()));
+                let _entered3 = tracing::span!(tracing::Level::INFO, "map specials").entered();
+                map_specials(
+                    &pt_buf,
+                    new_scratch_size.unwrap_or(layout.get_scratch_size()),
+                );
+                _entered3.exit();
+                let _entered4 = tracing::span!(tracing::Level::INFO, "set pt bytes").entered();
                 let pt_bytes = pt_buf.into_bytes();
                 layout.set_pt_size(pt_bytes.len())?;
                 snapshot_memory.extend(&pt_bytes);
+                _entered4.exit();
                 Ok::<Vec<u8>, crate::HyperlightError>(snapshot_memory)
             })
         })???;
+        _entered1.exit();
 
         // We do not need the original regions anymore, as any uses of
         // them in the guest have been incorporated into the snapshot
         // properly.
         let regions = Vec::new();
 
+        let _entered2 = tracing::span!(tracing::Level::INFO, "hash").entered();
         let hash = hash(&memory, &regions)?;
+        _entered2.exit();
 
+        let _entered3 =
+            tracing::span!(tracing::Level::INFO, "build ExclusiveSharedMemory").entered();
         let mut anon = ExclusiveSharedMemory::new(memory.len()).unwrap();
+        let _entered4 =
+            tracing::span!(tracing::Level::INFO, "copy to ExclusiveSharedMemory").entered();
         anon.copy_from_slice(&memory, 0);
+        _entered4.exit();
+        let _entered5 = tracing::span!(tracing::Level::INFO, "build memory").entered();
         let memory = anon.build();
+        _entered5.exit();
+        _entered3.exit();
 
         Ok(Self {
             sandbox_id,

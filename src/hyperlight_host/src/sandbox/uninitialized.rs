@@ -167,6 +167,7 @@ impl UninitializedSandbox {
     // `InterruptHandler` on Linux.
     //
     // This is ok for now as this is not a public function
+    #[instrument(err(Debug), skip(snapshot, cfg, binary_path), level = "Info")]
     fn from_snapshot(
         mut snapshot: Snapshot,
         cfg: Option<SandboxConfiguration>,
@@ -261,7 +262,7 @@ impl UninitializedSandbox {
     /// This method consumes the `UninitializedSandbox` and performs the final initialization
     /// steps to create the underlying virtual machine. Once evolved, the resulting
     /// [`MultiUseSandbox`] can execute guest code and handle function calls.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Info")]
     pub fn evolve(self) -> Result<MultiUseSandbox> {
         evolve_impl_multi_use(self)
     }

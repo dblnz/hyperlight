@@ -35,7 +35,7 @@ use crate::sandbox::trace::MemTraceInfo;
 use crate::signal_handlers::setup_signal_handlers;
 use crate::{MultiUseSandbox, Result, UninitializedSandbox};
 
-#[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+#[instrument(err(Debug), skip_all, parent = Span::current(), level = "Info")]
 pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<MultiUseSandbox> {
     let (mut hshm, gshm) = u_sbox.mgr.build()?;
     let mut vm = set_up_hypervisor_partition(
@@ -88,6 +88,7 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     ))
 }
 
+#[instrument(err(Debug), skip_all, level = "Info")]
 pub(crate) fn set_up_hypervisor_partition(
     mgr: SandboxMemoryManager<GuestSharedMemory>,
     #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
