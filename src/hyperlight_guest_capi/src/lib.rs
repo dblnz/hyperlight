@@ -23,4 +23,5 @@ pub mod dispatch;
 pub mod error;
 pub mod flatbuffer;
 pub mod logging;
+pub mod tracing;
 pub mod types;

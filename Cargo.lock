@@ -1603,6 +1603,7 @@ dependencies = [
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
+ "hyperlight-guest-tracing",
  "log",
 ]
 

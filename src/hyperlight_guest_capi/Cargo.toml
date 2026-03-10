@@ -11,9 +11,17 @@ crate-type = ["staticlib"]
 [lints]
 workspace = true
 
+[features]
+trace_guest = [
+    "hyperlight-guest-bin/trace_guest",
+    "hyperlight-guest-tracing/trace",
+    "hyperlight-common/trace_guest",
+]
+
 [dependencies]
 hyperlight-guest = { workspace = true, default-features = false }
 hyperlight-guest-bin = { workspace = true, default-features = true }
+hyperlight-guest-tracing = { workspace = true, default-features = false }
 hyperlight-common = { workspace = true, default-features = false }
 
 flatbuffers = { version = "25.12.19", default-features = false }
