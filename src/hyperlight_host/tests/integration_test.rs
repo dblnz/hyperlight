@@ -391,6 +391,22 @@ fn print_four_args_c_guest() {
     });
 }
 
+/// Verifies that a C guest can emit structured trace events via the
+/// `hl_tracing_span_open` / `hl_tracing_event` / `hl_tracing_close_span`
+/// APIs.  The guest's `TraceMessage` function opens a span, records a trace
+/// event containing the supplied message, and closes the span.  If the host
+/// fails to process the resulting trace batch the call will return an error.
+#[test]
+fn trace_message_c_guest() {
+    with_c_uninit_sandbox(|mut usbox| {
+        // Enable tracing by setting the max guest log level to TRACE.
+        usbox.set_max_guest_log_level(LevelFilter::TRACE);
+        let mut sbox = usbox.evolve().unwrap();
+        let res = sbox.call::<i32>("TraceMessage", "hello from C tracing".to_string());
+        assert!(matches!(&res, Ok(0)), "unexpected result: {res:?}");
+    });
+}
+
 // Checks that guest can abort with a specific code.
 #[test]
 fn guest_abort() {

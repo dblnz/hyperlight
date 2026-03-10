@@ -662,4 +662,81 @@ mod tests {
             err,
         );
     }
+
+    /// Test handling a trace batch matching the pattern emitted by the C guest
+    /// tracing API: OpenSpan with target "c_guest", a LogEvent with a "message"
+    /// field, and a CloseSpan.
+    #[test]
+    fn test_guest_trace_c_api_span_with_event() {
+        let mut trace_ctx = create_dummy_trace_context();
+
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "trace_message", "c_guest", 2000, vec![]),
+            create_log_event(
+                1,
+                2500,
+                "event",
+                vec![EventKeyValue {
+                    key: String::from("message"),
+                    value: String::from("hello from C guest"),
+                }],
+            ),
+            create_close_span(1, 3000),
+        ];
+
+        let res = trace_ctx.handle_trace_impl(events);
+        assert!(res.is_ok());
+        // Span was opened and closed, so it should be removed
+        assert!(trace_ctx.guest_spans.is_empty());
+        assert!(trace_ctx.host_spans.len() == 1);
+    }
+
+    /// Test handling a trace batch from the C API with nested spans.
+    /// Simulates a C guest opening a parent span, opening a child span,
+    /// emitting an event in the child, then closing both.
+    #[test]
+    fn test_guest_trace_c_api_nested_spans() {
+        let mut trace_ctx = create_dummy_trace_context();
+
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "outer_function", "c_guest", 2000, vec![]),
+            create_open_span(2, Some(1), "inner_function", "c_guest", 2500, vec![]),
+            create_log_event(
+                2,
+                2800,
+                "event",
+                vec![EventKeyValue {
+                    key: String::from("message"),
+                    value: String::from("processing inner"),
+                }],
+            ),
+            create_close_span(2, 3000),
+            create_close_span(1, 3500),
+        ];
+
+        let res = trace_ctx.handle_trace_impl(events);
+        assert!(res.is_ok());
+        assert!(trace_ctx.guest_spans.is_empty());
+        assert!(trace_ctx.host_spans.len() == 1);
+    }
+
+    /// Test the C API pattern where a span has no events inside it
+    /// (just open + close).
+    #[test]
+    fn test_guest_trace_c_api_span_no_events() {
+        let mut trace_ctx = create_dummy_trace_context();
+
+        let events = vec![
+            GuestEvent::GuestStart { tsc: 1000 },
+            create_open_span(1, None, "quick_op", "c_guest", 2000, vec![]),
+            create_close_span(1, 2100),
+        ];
+
+        let res = trace_ctx.handle_trace_impl(events);
+        assert!(res.is_ok());
+        assert!(trace_ctx.guest_spans.is_empty());
+        assert!(trace_ctx.host_spans.len() == 1);
+    }
 }
