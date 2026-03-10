@@ -275,4 +275,28 @@ hl_ParameterType _##function##_parameter_types[] = { hl_ParameterType_##arg1, \
 // Note that the function must first have been defined using the HYPERLIGHT_WRAP_FUNCTION macro
 #define HYPERLIGHT_REGISTER_FUNCTION(name, function)   hl_register_function_definition( name, &_call_##function, _##function##_parameter_count, _##function##_parameter_types, _##function##_return_type )
 
+// ---------- Tracing macros ----------
+// These provide a convenient interface for structured tracing in C guests.
+// When tracing is not compiled in (trace_guest feature not enabled), the
+// underlying hl_tracing_* functions are no-ops.
+
+// Opens a new tracing span and enters it.
+// Returns a uint64_t span ID that must be passed to TRACE_SPAN_CLOSE.
+// Returns 0 if tracing is not enabled.
+// Usage:
+//   uint64_t span = TRACE_SPAN_OPEN("my_function");
+//   /* ... work ... */
+//   TRACE_SPAN_CLOSE(span);
+#define TRACE_SPAN_OPEN(name) hl_tracing_span_open(name)
+
+// Closes a previously opened tracing span.
+#define TRACE_SPAN_CLOSE(span_id) hl_tracing_close_span(span_id)
+
+// Records a trace event in the current span context.
+// Usage: TRACE_EVENT("processing item 42");
+#define TRACE_EVENT(message) hl_tracing_event(message)
+
+// Returns true (non-zero) if guest tracing is enabled.
+#define IS_TRACE_ENABLED() hl_is_trace_enabled()
+
 #endif  /* HYPERLIGHT_GUEST_MACRO_H */

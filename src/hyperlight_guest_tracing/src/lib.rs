@@ -37,7 +37,8 @@ mod visitor;
 pub use state::TraceBatchInfo;
 #[cfg(feature = "trace")]
 pub use trace::{
-    end_trace, flush, init_guest_tracing, is_trace_enabled, new_call, reset, serialized_data,
+    close_span, end_trace, flush, init_guest_tracing, is_trace_enabled, new_call, open_span, reset,
+    serialized_data, trace_event,
 };
 
 /// This module is gated because some of these types are also used on the host, but we want
@@ -216,5 +217,70 @@ mod trace {
             .get()
             .map(|w| w.upgrade().is_some())
             .unwrap_or(false)
+    }
+
+    /// Opens a new tracing span, enters it, and returns its numeric ID.
+    ///
+    /// The returned ID must be passed to [`close_span`] when the span's
+    /// scope ends. If tracing is not initialized, returns 0.
+    ///
+    /// This is intended for use by the C guest API. Rust guests should
+    /// use the `tracing::span!` macro instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if unable to lock the guest state.
+    pub fn open_span(name: &str) -> u64 {
+        if let Some(w) = GUEST_STATE.get()
+            && let Some(state_mutex) = w.upgrade()
+        {
+            let mut state = state_mutex
+                .try_lock()
+                .expect("guest_tracing: Unable to lock guest tracing state in `open_span`");
+            state.open_span(name)
+        } else {
+            0
+        }
+    }
+
+    /// Closes a previously opened span by its numeric ID.
+    ///
+    /// The span is removed from the active span stack and a close
+    /// event is recorded. Does nothing if tracing is not initialized.
+    ///
+    /// # Panics
+    ///
+    /// Panics if unable to lock the guest state.
+    pub fn close_span(span_id: u64) {
+        if let Some(w) = GUEST_STATE.get()
+            && let Some(state_mutex) = w.upgrade()
+        {
+            let mut state = state_mutex
+                .try_lock()
+                .expect("guest_tracing: Unable to lock guest tracing state in `close_span`");
+            state.close_span(span_id);
+        }
+    }
+
+    /// Records a trace event in the context of the current span.
+    ///
+    /// The event contains the given message as a field.
+    /// Does nothing if tracing is not initialized.
+    ///
+    /// This is intended for use by the C guest API. Rust guests should
+    /// use the `tracing::event!` or `tracing::info!` macros instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if unable to lock the guest state.
+    pub fn trace_event(message: &str) {
+        if let Some(w) = GUEST_STATE.get()
+            && let Some(state_mutex) = w.upgrade()
+        {
+            let mut state = state_mutex
+                .try_lock()
+                .expect("guest_tracing: Unable to lock guest tracing state in `trace_event`");
+            state.record_event(message);
+        }
     }
 }

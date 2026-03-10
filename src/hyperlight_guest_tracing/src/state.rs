@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use hyperlight_common::flatbuffer_wrappers::guest_trace_data::{
-    EventsBatchEncoder, EventsEncoder, GuestEvent, MAX_TRACE_DATA_SIZE,
+    EventKeyValue, EventsBatchEncoder, EventsEncoder, GuestEvent, MAX_TRACE_DATA_SIZE,
 };
 use hyperlight_common::outb::OutBAction;
 use tracing_core::Event;
@@ -227,5 +227,68 @@ impl GuestState {
         self.encoder.encode(&event);
 
         true
+    }
+
+    /// Create a new span from string parameters, enter it immediately,
+    /// and return its numeric ID.
+    ///
+    /// This is designed for C API callers that cannot use `tracing_core` types.
+    /// The span is automatically pushed onto the active span stack.
+    pub(crate) fn open_span(&mut self, name: &str) -> u64 {
+        let (idn, _) = self.alloc_id();
+        let parent_id = self.stack.last().copied();
+
+        let event = GuestEvent::OpenSpan {
+            id: idn,
+            parent_id,
+            name: String::from(name),
+            target: String::from("c_guest"),
+            tsc: invariant_tsc::read_tsc(),
+            fields: Vec::new(),
+        };
+
+        self.encoder.encode(&event);
+        self.stack.push(idn);
+        idn
+    }
+
+    /// Exit and close a span by its numeric ID.
+    ///
+    /// This is designed for C API callers that cannot use `tracing_core` types.
+    /// The span is removed from the active span stack and a `CloseSpan` event
+    /// is recorded.
+    pub(crate) fn close_span(&mut self, id: u64) {
+        // Exit: remove from stack (search from top for most recent match)
+        if let Some(pos) = self.stack.iter().rposition(|&x| x == id) {
+            self.stack.remove(pos);
+        }
+
+        // Close: record CloseSpan event
+        let event = GuestEvent::CloseSpan {
+            id,
+            tsc: invariant_tsc::read_tsc(),
+        };
+        self.encoder.encode(&event);
+    }
+
+    /// Record a trace event from string parameters.
+    ///
+    /// This is designed for C API callers that cannot use `tracing_core` types.
+    /// The event is recorded in the context of the current span (top of the stack).
+    pub(crate) fn record_event(&mut self, message: &str) {
+        let parent_id = self.stack.last().copied().unwrap_or(0);
+        let fields = alloc::vec![EventKeyValue {
+            key: String::from("message"),
+            value: String::from(message),
+        }];
+
+        let event = GuestEvent::LogEvent {
+            parent_id,
+            name: String::from("event"),
+            tsc: invariant_tsc::read_tsc(),
+            fields,
+        };
+
+        self.encoder.encode(&event);
     }
 }
