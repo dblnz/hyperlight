@@ -129,7 +129,7 @@ impl TryFrom<hv_arm64_memory_intercept_message> for MemoryRegionFlags {
 // and crash dumps. Not part of the public API.
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 /// The type of memory region
-pub(crate) enum MemoryRegionType {
+pub enum MemoryRegionType {
     /// The region contains the guest's code
     Code,
     /// The region contains the guest's init data
@@ -293,7 +293,7 @@ pub struct MemoryRegion_<K: MemoryRegionKind> {
     /// memory access flags for the given region
     pub flags: MemoryRegionFlags,
     /// the type of memory region
-    pub(crate) region_type: MemoryRegionType,
+    pub region_type: MemoryRegionType,
 }
 
 /// A memory region that tracks both host and guest addresses.
