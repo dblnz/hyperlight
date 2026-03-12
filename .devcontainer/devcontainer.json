@@ -2,9 +2,7 @@
 // https://code.visualstudio.com/docs/devcontainers/create-dev-container
 {
   "name": "Hyperlight",
-
-  "image": "ghcr.io/hyperlight-dev/hyperlight-devcontainer:latest",
-
+  "image": "mcr.microsoft.com/devcontainers/base:bookwork",
   "containerUser": "vscode",
   // Environment for the container also used by the `postCreateCommand`
   "containerEnv": {
@@ -12,15 +10,12 @@
     "REMOTE_USER": "vscode",
     "REMOTE_GROUP": "vscode"
   },
-
   "runArgs": [
-      "--device=/dev/kvm"
+    "--device=/dev/kvm"
   ],
-
   // use `postStartCommand` for additional setup commands
   // this is run after the container is created and the user has been added
   "postStartCommand": "bash .devcontainer/setup.sh",
-
   "customizations": {
     "vscode": {
       "extensions": [
