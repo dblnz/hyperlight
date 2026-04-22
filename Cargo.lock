@@ -1596,6 +1596,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperlight-wit-macro"
+version = "0.14.0"
+dependencies = [
+ "env_logger",
+ "hyperlight-component-util",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "wasmparser 0.246.2",
+]
+
+[[package]]
 name = "hyperlight_guest_capi"
 version = "0.14.0"
 dependencies = [
