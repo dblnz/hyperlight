@@ -19,43 +19,21 @@ limitations under the License.
 //! This module provides the host function that guests call to report debug events
 //! (like hitting breakpoints) and receive debugger commands (like continue/step).
 
-use serde::{Deserialize, Serialize};
+// Re-export the shared types from hyperlight-debug so that the rest of
+// the host crate (and downstream users) can keep importing from here.
+pub use hyperlight_debug::dap::types::{
+    DebugAction, DebugActionType, DebugBreakEvent, DebugBreakReason, DebugBreakpoint,
+    DebugLocation, DebugStackFrame, DebugVariable, DEBUG_BREAK_FUNC_NAME,
+};
 
 use super::comm::DapCommChannel;
-use super::messages::{DapRequest, DapResponse, SourceLocation, StackFrame, StopReason};
+use super::messages::{
+    DapRequest, DapResponse, SourceLocation, StackFrame, StopReason, Variable,
+};
 
-/// Debug event sent from guest to host.
-///
-/// The guest serializes this to JSON and passes it to the `debug_break` host function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugBreakEvent {
-    /// Reason for the debug break
-    pub reason: DebugBreakReason,
-    /// Current source location
-    pub location: DebugLocation,
-    /// Current call stack (if available)
-    #[serde(default)]
-    pub stack_frames: Vec<DebugStackFrame>,
-    /// Optional exception message (if reason is Exception)
-    #[serde(default)]
-    pub exception_message: Option<String>,
-}
-
-/// Reason why the guest stopped execution.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DebugBreakReason {
-    /// Program entry point
-    Entry,
-    /// Hit a breakpoint
-    Breakpoint,
-    /// Completed a step operation
-    Step,
-    /// Paused by request
-    Pause,
-    /// Exception occurred
-    Exception,
-}
+// ---------------------------------------------------------------------------
+// Conversions from shared types → internal DAP-server types
+// ---------------------------------------------------------------------------
 
 impl From<DebugBreakReason> for StopReason {
     fn from(reason: DebugBreakReason) -> Self {
@@ -69,21 +47,6 @@ impl From<DebugBreakReason> for StopReason {
     }
 }
 
-/// Source location information from the guest.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct DebugLocation {
-    /// Source file path/name
-    pub filename: String,
-    /// Function name (optional)
-    #[serde(default)]
-    pub function_name: Option<String>,
-    /// Line number (1-based)
-    pub line: u32,
-    /// Column number (1-based, optional)
-    #[serde(default)]
-    pub column: Option<u32>,
-}
-
 impl From<DebugLocation> for SourceLocation {
     fn from(loc: DebugLocation) -> Self {
         SourceLocation {
@@ -95,17 +58,6 @@ impl From<DebugLocation> for SourceLocation {
     }
 }
 
-/// Stack frame information from the guest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugStackFrame {
-    /// Frame ID (assigned by guest)
-    pub id: u32,
-    /// Function name
-    pub name: String,
-    /// Source location
-    pub location: DebugLocation,
-}
-
 impl From<DebugStackFrame> for StackFrame {
     fn from(frame: DebugStackFrame) -> Self {
         StackFrame {
@@ -114,47 +66,6 @@ impl From<DebugStackFrame> for StackFrame {
             location: frame.location.into(),
         }
     }
-}
-
-/// Debug action returned from host to guest.
-///
-/// The host serializes this to JSON and returns it from the `debug_break` host function.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugAction {
-    /// The action the guest should take
-    pub action: DebugActionType,
-    /// Updated breakpoints (if any)
-    #[serde(default)]
-    pub breakpoints: Vec<DebugBreakpoint>,
-}
-
-/// Type of debug action for the guest to perform.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DebugActionType {
-    /// Continue execution normally
-    Continue,
-    /// Step to next statement (step over)
-    StepOver,
-    /// Step into function calls
-    StepInto,
-    /// Step out of current function
-    StepOut,
-    /// Disconnect debugger (continue without debugging)
-    Disconnect,
-}
-
-/// Breakpoint information sent from host to guest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DebugBreakpoint {
-    /// Unique breakpoint ID
-    pub id: u32,
-    /// Source file
-    pub filename: String,
-    /// Line number
-    pub line: u32,
-    /// Whether the breakpoint is enabled
-    pub enabled: bool,
 }
 
 /// Handles a debug break event from the guest.
@@ -191,61 +102,75 @@ pub fn handle_debug_break(
         };
     }
 
-    // Collect breakpoints to send back to guest
-    let mut breakpoints = Vec::new();
+    // Breakpoints keyed by source file.  Each `SetBreakpoints` call
+    // *replaces* all breakpoints for a given file (per DAP spec).
+    let mut breakpoints_by_file: std::collections::HashMap<String, Vec<DebugBreakpoint>> =
+        std::collections::HashMap::new();
+    // Monotonically increasing ID so every breakpoint gets a globally
+    // unique identifier across multiple `setBreakpoints` calls.
+    let mut next_bp_id: u32 = 1;
 
     // Wait for debugger commands
     loop {
+        // Flatten the per-file map into the vec sent back to the guest.
+        let collect_breakpoints = |m: &std::collections::HashMap<String, Vec<DebugBreakpoint>>| -> Vec<DebugBreakpoint> {
+            m.values().flatten().cloned().collect()
+        };
         match channel.recv() {
             Ok(request) => match request {
                 DapRequest::Continue => {
-                    // Send continued response to DAP
                     let _ = channel.send(DapResponse::Continued);
                     return DebugAction {
                         action: DebugActionType::Continue,
-                        breakpoints,
+                        breakpoints: collect_breakpoints(&breakpoints_by_file),
                     };
                 }
                 DapRequest::Next => {
                     let _ = channel.send(DapResponse::Continued);
                     return DebugAction {
                         action: DebugActionType::StepOver,
-                        breakpoints,
+                        breakpoints: collect_breakpoints(&breakpoints_by_file),
                     };
                 }
                 DapRequest::StepIn => {
                     let _ = channel.send(DapResponse::Continued);
                     return DebugAction {
                         action: DebugActionType::StepInto,
-                        breakpoints,
+                        breakpoints: collect_breakpoints(&breakpoints_by_file),
                     };
                 }
                 DapRequest::StepOut => {
                     let _ = channel.send(DapResponse::Continued);
                     return DebugAction {
                         action: DebugActionType::StepOut,
-                        breakpoints,
+                        breakpoints: collect_breakpoints(&breakpoints_by_file),
                     };
                 }
                 DapRequest::Disconnect { .. } => {
                     let _ = channel.send(DapResponse::Disconnected);
                     return DebugAction {
                         action: DebugActionType::Disconnect,
-                        breakpoints,
+                        breakpoints: collect_breakpoints(&breakpoints_by_file),
                     };
                 }
                 DapRequest::SetBreakpoints { source_path, lines } => {
-                    // Update breakpoints list to send back to guest
-                    for (i, line) in lines.iter().enumerate() {
-                        breakpoints.push(DebugBreakpoint {
-                            id: i as u32,
-                            filename: source_path.clone(),
-                            line: *line,
-                            enabled: true,
-                        });
-                    }
+                    // Replace all breakpoints for this source file
+                    // (DAP spec: setBreakpoints replaces, not accumulates).
+                    let file_bps: Vec<DebugBreakpoint> = lines
+                        .iter()
+                        .map(|&line| {
+                            let id = next_bp_id;
+                            next_bp_id += 1;
+                            DebugBreakpoint {
+                                id,
+                                filename: source_path.clone(),
+                                line,
+                                enabled: true,
+                            }
+                        })
+                        .collect();
                     // Acknowledge to DAP server
-                    let bp_response: Vec<_> = breakpoints
+                    let bp_response: Vec<_> = file_bps
                         .iter()
                         .map(|bp| super::messages::Breakpoint {
                             id: bp.id,
@@ -254,10 +179,10 @@ pub fn handle_debug_break(
                             message: None,
                         })
                         .collect();
+                    breakpoints_by_file.insert(source_path, file_bps);
                     let _ = channel.send(DapResponse::BreakpointsSet {
                         breakpoints: bp_response,
                     });
-                    // Continue waiting for continue/step command
                 }
                 DapRequest::StackTrace { .. } => {
                     // Send stack trace from the event
@@ -283,9 +208,26 @@ pub fn handle_debug_break(
                         }],
                     });
                 }
-                DapRequest::Variables { .. } => {
-                    // For POC, return empty variables
-                    let _ = channel.send(DapResponse::Variables { variables: vec![] });
+                DapRequest::Variables { variables_reference } => {
+                    // Derive frame_id from variables_reference (Scopes uses frame_id + 1000).
+                    let frame_id = variables_reference.saturating_sub(1000);
+                    let variables: Vec<super::messages::Variable> = event
+                        .stack_frames
+                        .iter()
+                        .find(|f| f.id == frame_id)
+                        .map(|f| {
+                            f.variables
+                                .iter()
+                                .map(|v| super::messages::Variable {
+                                    name: v.name.clone(),
+                                    value: v.value.clone(),
+                                    type_name: v.type_name.clone(),
+                                    variables_reference: 0,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = channel.send(DapResponse::Variables { variables });
                 }
                 DapRequest::Evaluate { expression, .. } => {
                     // For POC, just echo the expression
@@ -305,12 +247,9 @@ pub fn handle_debug_break(
                 // Return continue on error to avoid hanging
                 return DebugAction {
                     action: DebugActionType::Continue,
-                    breakpoints,
+                    breakpoints: collect_breakpoints(&breakpoints_by_file),
                 };
             }
         }
     }
 }
-
-/// The name of the debug_break host function.
-pub const DEBUG_BREAK_FUNC_NAME: &str = "hl_dap_debug_break";

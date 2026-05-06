@@ -1450,6 +1450,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperlight-debug"
+version = "0.14.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hyperlight-fuzz"
 version = "0.0.0"
 dependencies = [
@@ -1481,11 +1489,13 @@ dependencies = [
  "flatbuffers",
  "glob",
  "hyperlight-common",
+ "hyperlight-debug",
  "hyperlight-guest",
  "hyperlight-guest-macro",
  "hyperlight-guest-tracing",
  "linkme",
  "log",
+ "serde_json",
  "spin",
  "tracing",
 ]
@@ -1534,6 +1544,7 @@ dependencies = [
  "goblin",
  "hyperlight-common",
  "hyperlight-component-macro",
+ "hyperlight-debug",
  "hyperlight-guest-tracing",
  "hyperlight-testing",
  "iced-x86",

@@ -1,0 +1,24 @@
+[package]
+name = "hyperlight-debug"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = """
+Shared DAP (Debug Adapter Protocol) types for communication between
+Hyperlight host and guest runtimes.
+"""
+
+[lib]
+name = "hyperlight_debug"
+
+[features]
+default = []
+serde = ["dep:serde", "dep:serde_json"]
+
+[dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"], optional = true }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"], optional = true }

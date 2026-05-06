@@ -18,6 +18,7 @@ members = [
     "src/hyperlight_component_util",
     "src/hyperlight_component_macro",
     "src/hyperlight_wit_macro",
+    "src/hyperlight_debug",
     "src/trace_dump",
 ]
 # Guests have custom linker flags, so we need to exclude them from the workspace
@@ -48,6 +49,7 @@ hyperlight-component-util = { path = "src/hyperlight_component_util", version = 
 hyperlight-component-macro = { path = "src/hyperlight_component_macro", version = "0.14.0", default-features = false }
 hyperlight-wit-macro = { path = "src/hyperlight_wit_macro", version = "0.14.0", default-features = false }
 hyperlight-wit = { path = "src/hyperlight_wit", version = "0.14.0", default-features = false }
+hyperlight-debug = { path = "src/hyperlight_debug", version = "0.14.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

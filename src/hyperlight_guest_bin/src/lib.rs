@@ -54,6 +54,9 @@ pub mod memory;
 #[cfg(target_arch = "x86_64")]
 pub mod paging;
 
+#[cfg(feature = "dap")]
+pub mod dap;
+
 // Globals
 #[cfg(all(feature = "mem_profile", target_arch = "x86_64"))]
 struct ProfiledLockedHeap<const ORDER: usize>(LockedHeap<ORDER>);

@@ -33,6 +33,7 @@ fallible-iterator = { version = "0.3.0", optional = true }
 blake3 = "1.8.4"
 page_size = "0.6.0"
 serde = { version = "1.0", features = ["derive"], optional = true }
+hyperlight-debug = { workspace = true, features = ["serde"], optional = true }
 termcolor = "1.2.0"
 bitflags = "2.11.1"
 log = "0.4.29"
@@ -137,7 +138,7 @@ hw-interrupts = []
 # This enables easy debug in the guest
 gdb = ["dep:gdbstub", "dep:gdbstub_arch"]
 # This enables Debug Adapter Protocol support for source-level debugging
-dap = ["dep:serde"]
+dap = ["dep:serde", "dep:hyperlight-debug"]
 fuzzing = ["hyperlight-common/fuzzing"]
 build-metadata = ["dep:built"]
 nanvix-unstable = ["hyperlight-common/nanvix-unstable"]
